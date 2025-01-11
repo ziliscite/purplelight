@@ -1,7 +1,9 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"github.com/ziliscite/purplelight/internal/configs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,13 +19,13 @@ const version = "1.0.0"
 // and middleware. At the moment this only contains a copy of the config struct and a
 // logger, but it will grow to include a lot more as our build progresses.
 type application struct {
-	config Config
+	config configs.Config
 	logger *slog.Logger
 }
 
 func main() {
 	// Get an instance of the config struct.
-	cfg := GetConfig()
+	cfg := configs.GetConfig()
 
 	// Initialize a new structured logger which writes log entries to the standard out stream.
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
