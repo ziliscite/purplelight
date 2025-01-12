@@ -1,6 +1,6 @@
-## Chapter 3.1 
+# Chapter 3
 
-##### JSON Is Just Text
+### JSON Is Just Text
 JSON is just text. Sure, it has certain control characters that give the text structure and meaning, but fundamentally, it is just text.
 
 So that means you can write a JSON response from your Go handlers 
@@ -10,7 +10,7 @@ In fact, the only special thing we need to do is set a Content-Type:
 application/json header on the response, so that the client knows 
 it’s receiving JSON and can interpret it accordingly.
 
-##### JSON Types Encoding
+### JSON Types Encoding
 In this chapter we’ve been encoding a map[string]string type to JSON, which resulted in a JSON object with JSON strings as the values in the key/value pairs. But Go supports encoding many other native types too.
 
 The following table summarizes how different Go types are mapped to JSON data types during encoding:
@@ -39,7 +39,7 @@ Channels, functions and complex number types cannot be encoded. If you try to do
 
 Any pointer values will encode as the value pointed to.
 
-##### JSON Marshall Indent
+### JSON Marshall Indent
 Actual JSON response data is all just on one line with no whitespace.
 
 ```shell
@@ -74,7 +74,7 @@ BenchmarkMarshal-8              3619472     1637 ns/op     1119 B/op     16 allo
 
 In these benchmarks we can see that json.MarshalIndent() takes 65% longer to run and uses around 30% more memory than json.Marshal()
 
-##### Enveloping Response
+### Enveloping Response
 ```shell
 {
     "movie": {
@@ -125,7 +125,7 @@ func (app *application) writeJSON(w http.ResponseWriter, status int, data envelo
 }
 ```
 
-##### Go Handles JSON, How?
+### Go Handles JSON, How?
 When Go is encoding a particular type to JSON, it looks to see if the type has a MarshalJSON() method implemented on it. If it has, then Go will call this method to determine how to encode it.
 
 Strictly speaking, when Go is encoding a particular type to JSON it looks to see if the type satisfies the json.Marshaler interface, which looks like this:
@@ -142,7 +142,7 @@ If the type doesn’t have a MarshalJSON() method, then Go will fall back to try
 
 So, if we want to customize how something is encoded, all we need to do is implement a MarshalJSON() method on it which returns a custom JSON representation of itself in a []byte slice.
 
-##### Custom marshaler
+### Custom marshaler
 Let’s change this so that it’s encoded as a string with the format "<runtime> mins" instead
 ```json
 {
@@ -194,7 +194,7 @@ json: error calling MarshalJSON for type data.Runtime: invalid character 'm' aft
 
 Hint: The difference between pointer and value receivers: [this](https://medium.com/globant/go-method-receiver-pointer-vs-value-ffc5ab7acdb) blog post provides a good summary.
 
-##### Error messages
+### Error messages
 we’re still sending them a plain-text error message from the http.Error() and http.NotFound() functions.
 
 ```go
@@ -230,7 +230,7 @@ func (app *application) errorResponse(w http.ResponseWriter, r *http.Request, st
 ```
 Any error messages that our own API handlers send will now be well-formed JSON responses.
 
-##### Routing errors
+### Routing errors
 Error messages that httprouter automatically sends when it can’t find a matching route? 
 By default, these will still be the same plain-text (non-JSON) responses that we saw earlier in the book.
 
@@ -261,7 +261,7 @@ func (app *application) routes() http.Handler {
 
 http/net could never, lmao
 
-##### Panic recovery
+### Panic recovery
 At the moment any panics in our API handlers will be recovered automatically by Go’s http.Server. 
 This will unwind the stack for the affected goroutine (calling any deferred functions along the way), close the underlying HTTP connection, 
 and log an error message and stack trace.
@@ -297,7 +297,7 @@ func (app *application) recoverPanic(next http.Handler) http.Handler {
 }
 ```
 
-##### System generated error response
+### System generated error response
 Go’s http.Server may still automatically generate and send plain-text HTTP responses. These scenarios include when:
 - The HTTP request specifies an unsupported HTTP protocol version.
 - The HTTP request contains a missing or invalid Host header, or multiple Host headers.
@@ -308,7 +308,7 @@ Go’s http.Server may still automatically generate and send plain-text HTTP res
 
 > Unfortunately, these responses are hard-coded into the Go standard library, and there’s nothing we can do to customize them to use JSON instead.
 
-##### Panic recovery in other goroutines
+### Panic recovery in other goroutines
 It’s really important to realize that our middleware will only recover panics that happen in the same goroutine that executed the recoverPanic() middleware.
 
 If, for example, you have a handler which spins up another goroutine (e.g. to do some background processing), then any panics that happen in the background goroutine will not be recovered — not by the recoverPanic() middleware… and not by the panic recovery built into http.Server. These panics will cause your application to exit and bring down the server.
