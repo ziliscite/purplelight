@@ -32,7 +32,7 @@ func GetConfig() Config {
 		flag.StringVar(&instance.env, "env", "development", "Environment (development|staging|production)")
 		flag.Parse()
 	})
-
+	
 	return instance
 }
 
