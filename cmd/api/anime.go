@@ -10,21 +10,35 @@ import (
 // Add a createAnimeHandler for the "POST /v1/anime" endpoint. For now we simply
 // return a plain-text placeholder response.
 func (app *application) createAnimeHandler(w http.ResponseWriter, r *http.Request) {
-	var anime data.Anime
-	if err := json.NewDecoder(r.Body).Decode(&anime); err != nil {
-		err = app.write(w, http.StatusBadRequest, envelope{"Error": "Invalid request body"}, nil)
-		if err != nil {
-			app.logger.Error(err.Error())
-			http.Error(w, "The server encountered a problem and could not process your request", http.StatusInternalServerError)
-			return
-		}
+	// Declare an anonymous struct to hold the information that we expect to be in the
+	// HTTP request body (note that the field names and types in the struct are a subset
+	// of the struct that we created earlier). This struct will be our *target
+	// decode destination*.
+	var request struct {
+		Title    string         `json:"title"`              // Anime title
+		Type     data.AnimeType `json:"type,omitempty"`     // Anime type
+		Episodes int32          `json:"episodes,omitempty"` // Number of episodes in the anime
+		Status   data.Status    `json:"status,omitempty"`   // Status of the anime
+		Season   data.Season    `json:"season,omitempty"`   // Season of the anime
+		Year     int32          `json:"year,omitempty"`     // Year the anime was released
+		Duration int32          `json:"duration,omitempty"` // Anime duration in minutes
+		Tags     []string       `json:"tags,omitempty"`     // Slice of genres for the anime (romance, comedy, etc.)
+	}
+
+	// Initialize a new json.Decoder instance which reads from the request body, and
+	// then use the Decode() method to decode the body contents into the input struct.
+	// Importantly, notice that when we call Decode() we pass a *pointer* to the input
+	// struct as the target decode destination. If there was an error during decoding,
+	// we also use our generic errorResponse() helper to send the client a 400 Bad
+	// Request response containing the error message.
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		app.error(w, r, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
-	err := app.write(w, http.StatusOK, envelope{"anime": anime}, nil)
+	err := app.write(w, http.StatusCreated, envelope{"anime": request}, nil)
 	if err != nil {
-		app.logger.Error(err.Error())
-		http.Error(w, "The server encountered a problem and could not process your request", http.StatusInternalServerError)
+		app.serverError(w, r, err)
 	}
 }
 

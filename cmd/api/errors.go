@@ -16,12 +16,11 @@ func (app *application) logError(r *http.Request, err error) {
 // type for the message parameter, rather than just a string type, as this gives us
 // more flexibility over the values that we can include in the response.
 func (app *application) error(w http.ResponseWriter, r *http.Request, status int, message any) {
-	env := envelope{"error": message}
 
 	// Write the response using the write() helper. If this happens to return an
 	// error, then log it and fall back to sending the client an empty response with a
 	// 500 Internal Server Error status code.
-	err := app.write(w, status, env, nil)
+	err := app.write(w, status, envelope{"error": message}, nil)
 	if err != nil {
 		app.logError(r, err)
 		w.WriteHeader(500)

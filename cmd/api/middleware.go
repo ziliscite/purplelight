@@ -12,17 +12,15 @@ func (app *application) recoverPanic(next http.Handler) http.Handler {
 		defer func() {
 			// Use the builtin recover function to check if there has been a panic or not.
 			if err := recover(); err != nil {
-				// If there was a panic, set a "Connection: close" header on the
-				// response. This acts as a trigger to make Go's HTTP server
+				// This acts as a trigger to make Go's HTTP server
 				// automatically close the current connection after a response has been
 				// sent.
 				w.Header().Set("Connection", "close")
 
 				// The value returned by recover() has the type any, so we use
-				// fmt.Errorf() to normalize it into an error and call our
-				// serverError() helper. In turn, this will log the error using
-				// our custom Logger type at the ERROR level and send the client a 500
-				// Internal Server Error response.
+				// fmt.Errorf() to normalize it into an error.
+				// This will log the error using our custom Logger type at the ERROR level
+				// and send the client a 500 Internal Server Error response.
 				app.serverError(w, r, fmt.Errorf("%s", err))
 			}
 		}()

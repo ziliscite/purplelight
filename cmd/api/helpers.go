@@ -3,14 +3,15 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 
 	"github.com/julienschmidt/httprouter"
 )
 
-// Retrieve the "id" URL parameter from the current request context, then convert it to
-// an integer and return it. If the operation isn't successful, return 0 and an error.
+// Retrieve the "id" URL parameter, convert it to an integer, and return it.
+// If the operation isn't successful, return 0 and an error.
 func (app *application) readID(r *http.Request) (int64, error) {
 	// When httprouter is parsing a request, any interpolated URL parameters will be
 	// stored in the request context. We can use the ParamsFromContext() function to
@@ -40,14 +41,6 @@ func (app *application) write(w http.ResponseWriter, code int, data envelope, he
 		return err
 	}
 
-	// Use the json.MarshalIndent() function so that whitespace is added to the encoded
-	// JSON. Here we use no line prefix ("") and tab indents ("\t") for each element.
-	// The improved readability of responses is probably worth this trade-off.
-	//js, err := json.MarshalIndent(data, "", "\t")
-	//if err != nil {
-	//	return err
-	//}
-
 	// Append a newline to make it easier to view in terminal applications.
 	js = append(js, '\n')
 
@@ -60,14 +53,31 @@ func (app *application) write(w http.ResponseWriter, code int, data envelope, he
 		w.Header()[key] = value
 	}
 
-	// this function is equal to the top function
-	//maps.Insert(w.Header(), maps.All(headers))
-
 	// Add the "Content-Type: application/json" header, then write the status code and
 	// JSON response.
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	w.Write(js) // if you ignore the return value, you can probably ignore the error as well
+	w.Write(js)
+
+	return nil
+}
+
+func (app *application) readJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	// Use the http.MaxBytesReader() function to limit the size of the request body to 1MB.
+	maxBytes := 1_048_576
+	r.Body = http.MaxBytesReader(w, r.Body, int64(maxBytes))
+
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	err := dec.Decode(dst)
+	if err != nil {
+		return err
+	}
+
+	if err != io.EOF {
+		return errors.New("body must have only a single JSON value")
+	}
 
 	return nil
 }
