@@ -1,6 +1,7 @@
 package data
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -59,9 +60,7 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 		return ErrInvalidRuntimeFormat
 	}
 
-	// Convert the int32 to a Runtime type and assign this to the receiver. Note that we
-	// use the * operator to deference the receiver (which is a pointer to a Runtime
-	// type) in order to set the underlying value of the pointer.
-	*d = Duration(i)
+	// Set the movie duration to the value parsed from the JSON string
+	*d = Duration(dur)
 	return nil
 }

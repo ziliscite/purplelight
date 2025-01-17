@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"github.com/ziliscite/purplelight/internal/data"
 	"net/http"
 	"time"
@@ -21,22 +20,17 @@ func (app *application) createAnimeHandler(w http.ResponseWriter, r *http.Reques
 		Status   data.Status    `json:"status,omitempty"`   // Status of the anime
 		Season   data.Season    `json:"season,omitempty"`   // Season of the anime
 		Year     int32          `json:"year,omitempty"`     // Year the anime was released
-		Duration int32          `json:"duration,omitempty"` // Anime duration in minutes
+		Duration data.Duration  `json:"duration,omitempty"` // Anime duration in minutes
 		Tags     []string       `json:"tags,omitempty"`     // Slice of genres for the anime (romance, comedy, etc.)
 	}
 
-	// Initialize a new json.Decoder instance which reads from the request body, and
-	// then use the Decode() method to decode the body contents into the input struct.
-	// Importantly, notice that when we call Decode() we pass a *pointer* to the input
-	// struct as the target decode destination. If there was an error during decoding,
-	// we also use our generic errorResponse() helper to send the client a 400 Bad
-	// Request response containing the error message.
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		app.error(w, r, http.StatusBadRequest, "Invalid request body")
+	err := app.read(w, r, &request)
+	if err != nil {
+		app.badRequest(w, r, err)
 		return
 	}
 
-	err := app.write(w, http.StatusCreated, envelope{"anime": request}, nil)
+	err = app.write(w, http.StatusCreated, envelope{"anime": request}, nil)
 	if err != nil {
 		app.serverError(w, r, err)
 	}
@@ -64,6 +58,7 @@ func (app *application) showAnimeHandler(w http.ResponseWriter, r *http.Request)
 		Status:    data.Finished,
 		Season:    data.Spring,
 		Year:      2009,
+		Duration:  24,
 		Tags:      []string{"Action", "Adventure", "Fantasy"},
 		CreatedAt: time.Now(),
 		Version:   1,

@@ -10,7 +10,7 @@ type Anime struct {
 	Status   Status    `json:"status,omitempty"`   // Status of the anime
 	Season   Season    `json:"season,omitempty"`   // Season of the anime
 	Year     int32     `json:"year,omitempty"`     // Year the anime was released
-	Duration int32     `json:"duration,omitempty"` // Anime duration in minutes
+	Duration Duration  `json:"duration,omitempty"` // Anime duration in minutes
 	Tags     []string  `json:"tags,omitempty"`     // Slice of genres for the anime (romance, comedy, etc.)
 
 	CreatedAt time.Time `json:"-"`       // Timestamp for when the anime is added to our database
