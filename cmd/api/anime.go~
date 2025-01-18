@@ -21,7 +21,7 @@ func (app *application) createAnimeHandler(w http.ResponseWriter, r *http.Reques
 		Status   data.Status    `json:"status,omitempty"`   // Status of the anime
 		Season   data.Season    `json:"season,omitempty"`   // Season of the anime
 		Year     *int32         `json:"year,omitempty"`     // Year the anime was released
-		Duration *data.Duration `json:"duration,omitempty"` // Anime duration in minutes
+		Duration *data.Duration  `json:"duration,omitempty"` // Anime duration in minutes
 		Tags     []string       `json:"tags,omitempty"`     // Slice of genres for the anime (romance, comedy, etc.)
 	}
 

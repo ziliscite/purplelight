@@ -16,12 +16,11 @@ func (app *application) logError(r *http.Request, err error) {
 // type for the message parameter, rather than just a string type, as this gives us
 // more flexibility over the values that we can include in the response.
 func (app *application) error(w http.ResponseWriter, r *http.Request, status int, message any) {
-	env := envelope{"error": message}
 
 	// Write the response using the write() helper. If this happens to return an
 	// error, then log it and fall back to sending the client an empty response with a
 	// 500 Internal Server Error status code.
-	err := app.write(w, status, env, nil)
+	err := app.write(w, status, envelope{"error": message}, nil)
 	if err != nil {
 		app.logError(r, err)
 		w.WriteHeader(500)
@@ -51,4 +50,15 @@ func (app *application) notFound(w http.ResponseWriter, r *http.Request) {
 func (app *application) methodNotAllowed(w http.ResponseWriter, r *http.Request) {
 	message := fmt.Sprintf("the %s method is not supported for this resource", r.Method)
 	app.error(w, r, http.StatusMethodNotAllowed, message)
+}
+
+// The badRequest() method will be used to send a 400 Bad Request status code
+func (app *application) badRequest(w http.ResponseWriter, r *http.Request, err error) {
+	app.error(w, r, http.StatusBadRequest, err.Error())
+}
+
+// Note that the errors parameter here has the type map[string]string, which is exactly
+// the same as the errors map contained in our Validator type.
+func (app *application) failedValidation(w http.ResponseWriter, r *http.Request, errors map[string]string) {
+	app.error(w, r, http.StatusUnprocessableEntity, errors)
 }

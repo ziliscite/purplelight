@@ -14,8 +14,8 @@ const (
 	Upcoming Status = "Upcoming"
 )
 
-func (s *Status) String() string {
-	return string(*s)
+func (s Status) String() string {
+	return string(s)
 }
 
 func (s *Status) Set(value string) {
@@ -34,7 +34,7 @@ func (s *Status) Scan(value interface{}) error {
 	return nil
 }
 
-func (s *Status) Value() (driver.Value, error) {
+func (s Status) Value() (driver.Value, error) {
 	return s.String(), nil
 }
 

@@ -8,8 +8,14 @@ import (
 	"time"
 )
 
+// Declare a string containing the application version number. Later in the book we'll
+// generate this automatically at build time, but for now we'll just store the version
+// number as a hard-coded global constant.
 const version = "1.0.0"
 
+// Define an application struct to hold the dependencies for our HTTP handlers, helpers,
+// and middleware. At the moment this only contains a copy of the config struct and a
+// logger, but it will grow to include a lot more as our build progresses.
 type application struct {
 	config Config
 	logger *slog.Logger
@@ -24,6 +30,7 @@ func main() {
 		logger: logger,
 	}
 
+	// Use the httprouter instance returned by app.routes() as the server handler.
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.port),
 		Handler:      app.routes(),

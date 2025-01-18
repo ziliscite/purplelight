@@ -16,8 +16,8 @@ const (
 	Special AnimeType = "Special"
 )
 
-func (a AnimeType) String() string {
-	return string(a)
+func (a *AnimeType) String() string {
+	return string(*a)
 }
 
 func (a *AnimeType) Set(value string) {
@@ -36,7 +36,7 @@ func (a *AnimeType) Scan(value interface{}) error {
 	return nil
 }
 
-func (a AnimeType) Value() (driver.Value, error) {
+func (a *AnimeType) Value() (driver.Value, error) {
 	return a.String(), nil
 }
 

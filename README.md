@@ -1,319 +1,571 @@
-# Chapter 3
+# Chapter 4
 
-### JSON Is Just Text
-JSON is just text. Sure, it has certain control characters that give the text structure and meaning, but fundamentally, it is just text.
+This chapter will discuss how to read and parse JSON requests from clients.
 
-So that means you can write a JSON response from your Go handlers 
-in the same way that you would write any other text response: 
-using w.Write(), io.WriteString() or one of the fmt.Fprint functions. 
-In fact, the only special thing we need to do is set a Content-Type: 
-application/json header on the response, so that the client knows 
-it’s receiving JSON and can interpret it accordingly.
+Key points:
+- How to read a request body and decode it to a native Go object using the encoding/json package.  
+- How to deal with bad requests from clients and invalid JSON, and return clear, actionable, error messages.  
+- How to create a reusable helper package for validating data to ensure it meets your business rules.  
+- Different techniques for controlling and customizing how JSON is decoded.
 
-### JSON Types Encoding
-In this chapter we’ve been encoding a map[string]string type to JSON, which resulted in a JSON object with JSON strings as the values in the key/value pairs. But Go supports encoding many other native types too.
+### Decoding
 
-The following table summarizes how different Go types are mapped to JSON data types during encoding:
+We can use a `json.Decoder` type or using the `json.Unmarshal()` function.
 
-Go type	⇒	JSON type
-bool	⇒	JSON boolean
-string	⇒	JSON string
-int*, uint*, float*, rune	⇒	JSON number
-array, slice	⇒	JSON array
-struct, map	⇒	JSON object
-nil pointers, interface values, slices, maps, etc.	⇒	JSON null
-chan, func, complex*	⇒	Not supported
-time.Time	⇒	RFC3339-format JSON string
-[]byte	⇒	Base64-encoded JSON string
-The last two of these are special cases which deserve a bit more explanation:
+Generally, using json.Decoder is the best choice. It’s more efficient than json.Unmarshal(), requires less code, and offers some helpful settings that you can use to tweak its behavior.  
 
-Go time.Time values (which are actually a struct behind the scenes) will be encoded as a JSON string in RFC 3339 format like "2020-11-08T06:27:59+01:00", rather than as a JSON object.
-
-A []byte slice will be encoded as a base64-encoded JSON string, rather than as a JSON array. So, for example, a byte slice of []byte{'h','e','l','l','o'} would appear as "aGVsbG8=" in the JSON output. The base64 encoding uses padding and the standard character set.
-
-A few other important things to mention:
-
-Encoding of nested objects is supported. So, for example, if you have a slice of structs in Go that will encode to an array of objects in JSON.
-
-Channels, functions and complex number types cannot be encoded. If you try to do so, you’ll get a json.UnsupportedTypeError error at runtime.
-
-Any pointer values will encode as the value pointed to.
-
-### JSON Marshall Indent
-Actual JSON response data is all just on one line with no whitespace.
-
-```shell
-$ curl localhost:4000/v1/healthcheck
-{"environment":"development","status":"available","version":"1.0.0"}
-```
-
-We can make these easier to read in terminals by using the json.MarshalIndent() function to encode our response data, instead of the regular json.Marshal()
-
-```shell
-$ curl -i localhost:4000/v1/healthcheck
-{
-        "environment": "development",
-        "status": "available",
-        "version": "1.0.0"
+You can decode a struct like this
+```go
+var input struct {
+    Title   string   `json:"title"`
+    Year    int32    `json:"year"`
+    Runtime int32    `json:"runtime"`
+    Genres  []string `json:"genres"`
 }
+
+err := json.NewDecoder(r.Body).Decode(&input)
+if err != nil {
+    app.errorResponse(w, r, http.StatusBadRequest, err.Error())
+    return
+}
+
+fmt.Fprintf(w, "%+v\n", input)
 ```
 
-The following benchmarks help to demonstrate the relative performance of json.Marshal() and json.MarshalIndent() using the code in this gist.
+Points:
+- When calling Decode() you must pass a non-nil pointer as the target destination. If you don’t, it will return a json.InvalidUnmarshalError error at runtime.
+- If the target decode destination is a struct, the struct fields must be exported. Just like with encoding.
+- When decoding a JSON object into a struct, the key/value pairs in the JSON are mapped to the struct fields based on the struct tag names. If there is no matching struct tag, Go will attempt to decode the value into a field that matches the key name (exact matches are preferred, but it will fall back to a case-insensitive match). Any JSON key/value pairs which cannot be successfully mapped to the struct fields will be silently ignored.
+- There is no need to close r.Body after it has been read. This will be done automatically by Go’s http.Server, so you don’t have to.
 
+
+> What happens if we omit a particular key/value pair in our JSON request body?
+```shell
+$ BODY='{"title":"Moana","runtime":107, "genres":["animation","adventure"]}'
+$ curl -d "$BODY" localhost:4000/v1/movies
+{Title:Moana Year:0 Runtime:107 Genres:[animation adventure]}
+```
+When we do this the Year field in our input struct is left with its zero value
+
+This leads to an interesting question: how can you tell the difference between a client not providing a key/value pair, and providing a key/value pair but deliberately setting it to its zero value?
+
+> json.Unmarshal vs json.Decoder  
+
+We can use it like this
+```go
+var input struct {
+    Foo string `json:"foo"`
+}
+
+// Use io.ReadAll() to read the entire request body into a []byte slice.
+body, err := io.ReadAll(r.Body)
+if err != nil {
+    app.serverErrorResponse(w, r, err)
+    return
+}
+
+err = json.Unmarshal(body, &input)
+if err != nil {
+    app.errorResponse(w, r, http.StatusBadRequest, err.Error())
+    return
+}
+
+fmt.Fprintf(w, "%+v\n", input)
+```
+
+However, this makes it more verbose and less efficient. Look at his benchmark:  
 ```shell
 $ go test -run=^$ -bench=. -benchmem -count=3 -benchtime=5s
 goos: linux
 goarch: amd64
-BenchmarkMarshalIndent-8        2177511     2695 ns/op     1472 B/op     18 allocs/op
-BenchmarkMarshalIndent-8        2170448     2677 ns/op     1473 B/op     18 allocs/op
-BenchmarkMarshalIndent-8        2150780     2712 ns/op     1476 B/op     18 allocs/op
-BenchmarkMarshal-8              3289424     1681 ns/op     1135 B/op     16 allocs/op
-BenchmarkMarshal-8              3532242     1641 ns/op     1123 B/op     16 allocs/op
-BenchmarkMarshal-8              3619472     1637 ns/op     1119 B/op     16 allocs/op
+BenchmarkUnmarshal-8      528088      9543 ns/op     2992 B/op     20 allocs/op
+BenchmarkUnmarshal-8      554365     10469 ns/op     2992 B/op     20 allocs/op
+BenchmarkUnmarshal-8      537139     10531 ns/op     2992 B/op     20 allocs/op
+BenchmarkDecoder-8        811063      8644 ns/op     1664 B/op     21 allocs/op
+BenchmarkDecoder-8        672088      8529 ns/op     1664 B/op     21 allocs/op
+BenchmarkDecoder-8       1000000      7573 ns/op     1664 B/op     21 allocs/op
 ```
 
-In these benchmarks we can see that json.MarshalIndent() takes 65% longer to run and uses around 30% more memory than json.Marshal()
+### Manage Bad Request
+Now, what ifs  
+- What if the client sends something that isn’t JSON, like XML or some random bytes?
+- What happens if the JSON is malformed or contains an error?
+- What if the JSON types don’t match the types we are trying to decode into?
+- What if the request doesn’t even contain a body?
 
-### Enveloping Response
 ```shell
+# Send some XML as the request body
+$ curl -d '<?xml version="1.0" encoding="UTF-8"?><note><to>Alice</to></note>' localhost:4000/v1/movies
 {
-    "movie": {
-        "id": 123,
-        "title": "Casablanca",
-        "runtime": 102,
-        "genres": [
-            "drama",
-            "romance",
-            "war"
-        ],
-        "version":1
-    }
+    "error": "invalid character '\u003c' looking for beginning of value"
+}
+
+# Send some malformed JSON (notice the trailing comma)
+$ curl -d '{"title": "Moana", }' localhost:4000/v1/movies
+{
+    "error": "invalid character '}' looking for beginning of object key string"
+}
+
+# Send a JSON array instead of an object
+$ curl -d '["foo", "bar"]' localhost:4000/v1/movies
+{
+    "error": "json: cannot unmarshal array into Go value of type struct { Title string 
+    \"json:\\\"title\\\"\"; Year int32 \"json:\\\"year\\\"\"; Runtime int32 \"json:\\
+    \"runtime\\\"\"; Genres []string \"json:\\\"genres\\\"\" }"
+}
+
+# Send a numeric 'title' value (instead of string)
+$ curl -d '{"title": 123}' localhost:4000/v1/movies
+{
+    "error": "json: cannot unmarshal number into Go struct field .title of type string"
+}
+
+# Send an empty request body
+$ curl -X POST localhost:4000/v1/movies
+{
+    "error": "EOF"
 }
 ```
-Notice how the movie data is nested under the key "movie" here, rather than being the top-level JSON object itself?
 
-A few tangible benefits of this:
+When it receives an invalid request that can’t be decoded into our input struct, no further processing takes place, and the error is returned to the client.
 
-1. Including a key name (like "movie") at the top-level of the JSON helps make the response more self-documenting. For any humans who see the response out of context, it is a bit easier to understand what the data relates to.
+> For a private API which won’t be used by members of the public, then this behavior is probably fine and you needn’t do anything else.
+> But for a public-facing API, the error messages themselves aren’t ideal. Some are too detailed and expose information about the underlying API implementation. Others aren’t descriptive enough (like "EOF"), and some are just plain confusing and difficult to understand. There isn’t consistency in the formatting or language used either.
 
-2. It reduces the risk of errors on the client side, because it’s harder to accidentally process one response thinking that it is something different. To get at the data, a client must explicitly reference it via the "movie" key.
+To solve it, we're going to `triage the errors`
 
-3. If we always envelope the data returned by our API, then we mitigate a security vulnerability in older browsers which can arise if you return a JSON array as a response.
+At this point in this app, the Decode() method could potentially return the following five types of error:
+
+| Error types               | Reason                                                                                     |
+|---------------------------|--------------------------------------------------------------------------------------------|
+| json.SyntaxError           | There is a syntax problem with the JSON being decoded.                                      |
+| io.ErrUnexpectedEOF        | There is a syntax problem with the JSON being decoded.                                      |
+| json.UnmarshalTypeError    | A JSON value is not appropriate for the destination Go type.                               |
+| json.InvalidUnmarshalError | The decode destination is not valid (usually because it is not a pointer). This is a problem with our application code, not the JSON itself. |
+| io.EOF                     | The JSON being decoded is empty.                                                           |
+
+
+> How do we triage these errors?
+```go
+// Decode the request body into the target destination. 
+err := json.NewDecoder(r.Body).Decode(dst)
+if err != nil {
+    // If there is an error during decoding, start the triage...
+    var syntaxError *json.SyntaxError
+    var unmarshalTypeError *json.UnmarshalTypeError
+    var invalidUnmarshalError *json.InvalidUnmarshalError
+
+    switch {
+    // Use the errors.As() function to check whether the error has the type 
+    // *json.SyntaxError. If it does, then return a plain-english error message 
+    // which includes the location of the problem.
+    case errors.As(err, &syntaxError):
+        return fmt.Errorf("body contains badly-formed JSON (at character %d)", syntaxError.Offset)
+
+    // In some circumstances Decode() may also return an io.ErrUnexpectedEOF error
+    // for syntax errors in the JSON. So we check for this using errors.Is() and
+    // return a generic error message. There is an open issue regarding this at
+    // https://github.com/golang/go/issues/25956.
+    case errors.Is(err, io.ErrUnexpectedEOF):
+        return errors.New("body contains badly-formed JSON")
+
+    // Likewise, catch any *json.UnmarshalTypeError errors. These occur when the
+    // JSON value is the wrong type for the target destination. If the error relates
+    // to a specific field, then we include that in our error message to make it 
+    // easier for the client to debug.
+    case errors.As(err, &unmarshalTypeError):
+        if unmarshalTypeError.Field != "" {
+            return fmt.Errorf("body contains incorrect JSON type for field %q", unmarshalTypeError.Field)
+        }
+        return fmt.Errorf("body contains incorrect JSON type (at character %d)", unmarshalTypeError.Offset)
+
+    // An io.EOF error will be returned by Decode() if the request body is empty. We
+    // check for this with errors.Is() and return a plain-english error message 
+    // instead.
+    case errors.Is(err, io.EOF):
+        return errors.New("body must not be empty")
+
+    // A json.InvalidUnmarshalError error will be returned if we pass something 
+    // that is not a non-nil pointer to Decode(). We catch this and panic, 
+    // rather than returning an error to our handler. At the end of this chapter 
+    // we'll talk about panicking versus returning errors, and discuss why it's an 
+    // appropriate thing to do in this specific situation.
+    case errors.As(err, &invalidUnmarshalError):
+        panic(err)
+
+    // For anything else, return the error message as-is.
+    default:
+        return err
+    }
+}
+
+// If there was no error, then we return nil to indicate success.
+return nil
+```
+
+The error messages are now simpler, clearer, and consistent in their formatting, and they don’t expose any unnecessary information about our underlying program.
+
+- Why panic?
+As you can see in the example above, we panic() if Decode() returns an error on invalid unmarshall error
+`in some specific circumstances` — it can be OK to panic.
+
+To our readJSON() helper, if we get a json.InvalidUnmarshalError at runtime it’s because we as the developers have passed an unsupported value to Decode(). 
+This is firmly an unexpected error which we shouldn’t see under normal operation, and is something that should be picked up in development and tests long before deployment.
+
+> A panic typically means something went unexpectedly wrong. Mostly we use it to fail fast on errors that shouldn’t occur during normal operation and that we aren’t prepared to handle gracefully.
+
+### Restricting Inputs
+
+We've previously dealt with invalid JSON and other bad request.
+
+But we can still do something about dealing with unknown fields.  
+For example:
+```go
+$ curl -i -d '{"title": "Moana", "rating":"PG"}' localhost:4000/v1/movies
+HTTP/1.1 200 OK
+Date: Tue, 06 Apr 2021 18:51:50 GMT
+Content-Length: 41
+Content-Type: text/plain; charset=utf-8
+
+{Title:Moana Year:0 Runtime:0 Genres:[]}
+```
+
+Notice how this request works without any problems — there’s no error to inform the client that the rating field is not recognized by our application.  
+In our case it would be better if we could alert the client to the issue.
+
+Fortunately, Go’s json.Decoder provides a DisallowUnknownFields() setting that we can use to generate an error when this happens.
+
+> Another problem we have is the fact that json.Decoder is designed to support streams of JSON data. When we call Decode() on our request body, it actually reads the first JSON value only from the body and decodes it. If we made a second call to Decode(), it would read and decode the second value and so on.
+
+But because we call Decode() once — and only once — in our readJSON() helper, anything after the first JSON value in the request body is ignored.
+
+```shell
+# Body contains multiple JSON values
+$ curl -i -d '{"title": "Moana"}{"title": "Top Gun"}' localhost:4000/v1/movies
+HTTP/1.1 200 OK
+Date: Tue, 06 Apr 2021 18:53:57 GMT
+Content-Length: 41
+Content-Type: text/plain; charset=utf-8
+
+{Title:Moana Year:0 Runtime:0 Genres:[]}
+
+# Body contains garbage content after the first JSON value
+$ curl -i -d '{"title": "Moana"} :~()' localhost:4000/v1/movies
+HTTP/1.1 200 OK
+Date: Tue, 06 Apr 2021 18:54:15 GMT
+Content-Length: 41
+Content-Type: text/plain; charset=utf-8
+```
+
+We can handle it through:  
+```go
+// Use http.MaxBytesReader() to limit the size of the request body to 1MB.
+maxBytes := 1_048_576
+r.Body = http.MaxBytesReader(w, r.Body, int64(maxBytes))
+
+// Initialize the json.Decoder, and call the DisallowUnknownFields() method on it
+// before decoding. This means that if the JSON from the client now includes any
+// field which cannot be mapped to the target destination, the decoder will return
+// an error instead of just ignoring the field.
+dec := json.NewDecoder(r.Body)
+dec.DisallowUnknownFields()
+
+// Decode the request body to the destination.
+err := dec.Decode(dst)
+if err != nil {
+	...
+	
+    // Add a new maxBytesError variable.
+    var maxBytesError *http.MaxBytesError
+
+    switch {
+	    ...
+
+    // If the JSON contains a field which cannot be mapped to the target destination
+    // then Decode() will now return an error message in the format "json: unknown
+    // field "<name>"". We check for this, extract the field name from the error,
+    // and interpolate it into our custom error message. Note that there's an open
+    // issue at https://github.com/golang/go/issues/29035 regarding turning this
+    // into a distinct error type in the future.
+    case strings.HasPrefix(err.Error(), "json: unknown field "):
+        fieldName := strings.TrimPrefix(err.Error(), "json: unknown field ")
+        return fmt.Errorf("body contains unknown key %s", fieldName)
+
+    // Use the errors.As() function to check whether the error has the type 
+    // *http.MaxBytesError. If it does, then it means the request body exceeded our 
+    // size limit of 1MB and we return a clear error message.
+    case errors.As(err, &maxBytesError):
+        return fmt.Errorf("body must not be larger than %d bytes", maxBytesError.Limit)
+		
+    ...
+}
+
+// Call Decode() again, using a pointer to an empty anonymous struct as the
+// destination. If the request body only contained a single JSON value this will
+// return an io.EOF error. So if we get anything else, we know that there is
+// additional data in the request body and we return our own custom error message.
+err = dec.Decode(&struct{}{})
+if !errors.Is(err, io.EOF) {
+    return errors.New("body must only contain a single JSON value")
+}
+
+return nil
+```
+
+Now, the previous request will return this error:
+```go
+$ curl -d '{"title": "Moana", "rating":"PG"}' localhost:4000/v1/movies
+{
+    "error": "body contains unknown key \"rating\""
+}
+
+$ curl -d '{"title": "Moana"}{"title": "Top Gun"}' localhost:4000/v1/movies
+{
+    "error": "body must only contain a single JSON value"
+}
+
+$ curl -d '{"title": "Moana"} :~()' localhost:4000/v1/movies
+{
+    "error": "body must only contain a single JSON value"
+}
+```
+
+### Custom JSON Decoding
+In the previous chapter, we make it so that runtime information was displayed in the format `<runtime> mins` in our JSON responses.  
+Here, we want to make it so that our json reader accepts the format `<runtime> min`.
+
+Right now, its not possible
+```go
+$ curl -d '{"title": "Moana", "runtime": "107 mins"}' localhost:4000/v1/movies
+{
+    "error": "body contains incorrect JSON type for \"runtime\""
+}
+```
+
+To make this work, what we need to do is intercept the decoding process and manually convert the "<runtime> mins" JSON string into an int32 instead.
+
+Similar to marshaller, we need to create a custom unmarshaller. When Go is decoding some JSON, it will check to see if the destination type satisfies the json.Unmarshaler interface.  
+The key thing here is knowing about Go’s json.Unmarshaler interface, which looks like this:
+```go
+type Unmarshaler interface {
+    UnmarshalJSON([]byte) error
+}
+```
+
+The first thing we need to do is update our createMovieHandler so that the input struct uses our custom Runtime type, instead of a regular int32.
+```go
+var input struct {
+    Title   string       `json:"title"`
+    Year    int32        `json:"year"`
+    Runtime data.Runtime `json:"runtime"` // Make this field a data.Runtime type.
+    Genres  []string     `json:"genres"`
+}
+```
+
+Head to the internal/data/runtime.go file and add a UnmarshalJSON() method to our Runtime type.
 
 ```go
-// Define an envelope type.
-type envelope map[string]any
-
-// Change the data parameter to have the type envelope instead of any.
-func (app *application) writeJSON(w http.ResponseWriter, status int, data envelope, headers http.Header) error {
-    js, err := json.MarshalIndent(data, "", "\t")
+// Implement a UnmarshalJSON() method on the Runtime type so that it satisfies the
+// json.Unmarshaler interface. IMPORTANT: Because UnmarshalJSON() needs to modify the
+// receiver (our Runtime type), we must use a pointer receiver for this to work 
+// correctly. Otherwise, we will only be modifying a copy (which is then discarded when 
+// this method returns).
+func (r *Runtime) UnmarshalJSON(jsonValue []byte) error {
+    // We expect that the incoming JSON value will be a string in the format 
+    // "<runtime> mins", and the first thing we need to do is remove the surrounding 
+    // double-quotes from this string. If we can't unquote it, then we return the 
+    // ErrInvalidRuntimeFormat error.
+    unquotedJSONValue, err := strconv.Unquote(string(jsonValue))
     if err != nil {
-    return err
+        return ErrInvalidRuntimeFormat
     }
-    
-    js = append(js, '\n')
-    
-    for key, value := range headers {
-    w.Header()[key] = value
+
+    // Split the string to isolate the part containing the number. 
+    parts := strings.Split(unquotedJSONValue, " ")
+
+    // Sanity check the parts of the string to make sure it was in the expected format. 
+    // If it isn't, we return the ErrInvalidRuntimeFormat error again.
+    if len(parts) != 2 || parts[1] != "mins" {
+        return ErrInvalidRuntimeFormat
     }
-    
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(status)
-    w.Write(js)
-    
+
+    // Otherwise, parse the string containing the number into an int32. Again, if this
+    // fails return the ErrInvalidRuntimeFormat error.
+    i, err := strconv.ParseInt(parts[0], 10, 32)
+    if err != nil {
+        return ErrInvalidRuntimeFormat
+    }
+
+    // Convert the int32 to a Runtime type and assign this to the receiver. Note that we
+    // use the * operator to deference the receiver (which is a pointer to a Runtime 
+    // type) in order to set the underlying value of the pointer.
+    *r = Runtime(i)
+
     return nil
 }
 ```
 
-### Go Handles JSON, How?
-When Go is encoding a particular type to JSON, it looks to see if the type has a MarshalJSON() method implemented on it. If it has, then Go will call this method to determine how to encode it.
+Now's this the result:
+```shell
+$ curl -d '{"title": "Moana", "runtime": "107 mins"}' localhost:4000/v1/movies
+{Title:Moana Year:0 Runtime:107 Genres:[]}
 
-Strictly speaking, when Go is encoding a particular type to JSON it looks to see if the type satisfies the json.Marshaler interface, which looks like this:
-
-```go
-type Marshaler interface {
-    MarshalJSON() ([]byte, error)
-}
-```
-
-If the type does satisfy the interface, then Go will call its MarshalJSON() method and use the []byte slice that it returns as the encoded JSON value.
-
-If the type doesn’t have a MarshalJSON() method, then Go will fall back to trying to encode it to JSON based on its own internal set of rules.
-
-So, if we want to customize how something is encoded, all we need to do is implement a MarshalJSON() method on it which returns a custom JSON representation of itself in a []byte slice.
-
-### Custom marshaler
-Let’s change this so that it’s encoded as a string with the format "<runtime> mins" instead
-```json
+$ curl -d '{"title": "Moana", "runtime": 107}' localhost:4000/v1/movies
 {
-    "id": 123,
-    "title": "Casablanca",
-    "runtime": "102 mins",      ← This is now a string
-    "genres": [
-        "drama",
-        "romance",
-        "war"
-    ],
-    "version":1
+        "error": "invalid runtime format"
+}
+
+$ curl -d '{"title": "Moana", "runtime": "107 minutes"}' localhost:4000/v1/movies
+{
+        "error": "invalid runtime format"
 }
 ```
 
-Here's how
+### Validating JSON Input
+
+In this section we learn to validate a json input
+- The movie title provided by the client is not empty and is not more than 500 bytes long.
+- The movie year is not empty and is between 1888 and the current year.
+- The movie runtime is not empty and is a positive integer.
+- The movie has between one and five (unique) genres.
+
+// of course, mine is anime, so I'll add more rules.
+
+First we create a validator package
 ```go
-// Declare a custom Runtime type, which has the underlying type int32 (the same as our
-// Movie struct field).
-type Runtime int32
-
-// Implement a MarshalJSON() method on the Runtime type so that it satisfies the 
-// json.Marshaler interface. This should return the JSON-encoded value for the movie 
-// runtime (in our case, it will return a string in the format "<runtime> mins").
-func (r Runtime) MarshalJSON() ([]byte, error) {
-    // Generate a string containing the movie runtime in the required format.
-    jsonValue := fmt.Sprintf("%d mins", r)
-
-    // Use the strconv.Quote() function on the string to wrap it in double quotes. It 
-    // needs to be surrounded by double quotes in order to be a valid *JSON string*.
-    quotedJSONValue := strconv.Quote(jsonValue)
-
-    // Convert the quoted string value to a byte slice and return it.
-    return []byte(quotedJSONValue), nil
-}
-```
-
-There are two things to emphasize here:
-
-1. If your MarshalJSON() method returns a JSON string value, like ours does, then you must wrap the string in double quotes before returning it. Otherwise it won’t be interpreted as a JSON string and you’ll receive a runtime error similar to this:
-
-```
-json: error calling MarshalJSON for type data.Runtime: invalid character 'm' after top-level value
-```
-
-2. We’re deliberately using a value receiver for our MarshalJSON() method rather than a pointer receiver like func (r *Runtime) MarshalJSON(). This gives us more flexibility because it means that our custom JSON encoding will work on both Runtime values and pointers to Runtime values. As Effective Go mentions:
-
-> The rule about pointers vs. values for receivers is that value methods can be invoked on pointers and values, but pointer methods can only be invoked on pointers.
-
-Hint: The difference between pointer and value receivers: [this](https://medium.com/globant/go-method-receiver-pointer-vs-value-ffc5ab7acdb) blog post provides a good summary.
-
-### Error messages
-we’re still sending them a plain-text error message from the http.Error() and http.NotFound() functions.
-
-```go
-// The logError() method is a generic helper for logging an error message along
-// with the current request method and URL as attributes in the log entry.
-func (app *application) logError(r *http.Request, err error) {
-    var (
-        method = r.Method
-        uri    = r.URL.RequestURI()
-    )
-    
-    app.logger.Error(err.Error(), "method", method, "uri", uri)
+// Define a new Validator type which contains a map of validation errors.
+type Validator struct {
+    Errors map[string]string
 }
 
-// The errorResponse() method is a generic helper for sending JSON-formatted error
-// messages to the client with a given status code. Note that we're using the any
-// type for the message parameter, rather than just a string type, as this gives us
-// more flexibility over the values that we can include in the response.
-func (app *application) errorResponse(w http.ResponseWriter, r *http.Request, status int, message any) {
-    env := envelope{"error": message}
+// New is a helper which creates a new Validator instance with an empty errors map.
+func New() *Validator {
+    return &Validator{Errors: make(map[string]string)}
+}
 
-    // Write the response using the writeJSON() helper. If this happens to return an
-    // error then log it, and fall back to sending the client an empty response with a
-    // 500 Internal Server Error status code.
-    err := app.writeJSON(w, status, env, nil)
-    if err != nil {
-        app.logError(r, err)
-        w.WriteHeader(500)
+// Valid returns true if the errors map doesn't contain any entries.
+func (v *Validator) Valid() bool {
+    return len(v.Errors) == 0
+}
+
+// AddError adds an error message to the map (so long as no entry already exists for
+// the given key).
+func (v *Validator) AddError(key, message string) {
+    if _, exists := v.Errors[key]; !exists {
+        v.Errors[key] = message
     }
 }
 
-// custom error response for each method
-```
-Any error messages that our own API handlers send will now be well-formed JSON responses.
+// Check adds an error message to the map only if a validation check is not 'ok'.
+func (v *Validator) Check(ok bool, key, message string) {
+    if !ok {
+        v.AddError(key, message)
+    }
+}
 
-### Routing errors
-Error messages that httprouter automatically sends when it can’t find a matching route? 
-By default, these will still be the same plain-text (non-JSON) responses that we saw earlier in the book.
+// Generic function which returns true if a specific value is in a list of permitted
+// values.
+func PermittedValue[T comparable](value T, permittedValues ...T) bool {
+    return slices.Contains(permittedValues, value)
+}
 
-Fortunately, httprouter allows us to set our own custom error handlers when we initialize the router. 
-These custom handlers must satisfy the http.Handler interface, 
-so we can re-use the notFoundResponse() and methodNotAllowedResponse() helpers.
+// Matches returns true if a string value matches a specific regexp pattern.
+func Matches(value string, rx *regexp.Regexp) bool {
+    return rx.MatchString(value)
+}
 
-```go
-func (app *application) routes() http.Handler {
-    router := httprouter.New()
+// Generic function which returns true if all values in a slice are unique.
+func Unique[T comparable](values []T) bool {
+    uniqueValues := make(map[T]bool)
 
-    // Convert the notFoundResponse() helper to a http.Handler using the 
-    // http.HandlerFunc() adapter, and then set it as the custom error handler for 404
-    // Not Found responses.
-    router.NotFound = http.HandlerFunc(app.notFoundResponse)
+    for _, value := range values {
+        uniqueValues[value] = true
+    }
 
-    // Likewise, convert the methodNotAllowedResponse() helper to a http.Handler and set
-    // it as the custom error handler for 405 Method Not Allowed responses.
-    router.MethodNotAllowed = http.HandlerFunc(app.methodNotAllowedResponse)
-
-    router.HandlerFunc(http.MethodGet, "/v1/healthcheck", app.healthcheckHandler)
-    router.HandlerFunc(http.MethodPost, "/v1/movies", app.createMovieHandler)
-    router.HandlerFunc(http.MethodGet, "/v1/movies/:id", app.showMovieHandler)
-
-    return router
+    return len(values) == len(uniqueValues)
 }
 ```
 
-http/net could never, lmao
-
-### Panic recovery
-At the moment any panics in our API handlers will be recovered automatically by Go’s http.Server. 
-This will unwind the stack for the affected goroutine (calling any deferred functions along the way), close the underlying HTTP connection, 
-and log an error message and stack trace.
-
-This behavior is OK, but it would be better for the client if we could also send a 500 Internal Server Error 
-response to explain that something has gone wrong — rather than just closing the HTTP connection with no context.
-
+To will then perform validation check, if it fails,
+we send 422 Unprocessable Entity status code and JSON response to the client.
 ```go
-func (app *application) recoverPanic(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Create a deferred function (which will always be run in the event of a panic as Go unwinds the stack).
-
-		defer func() {
-			// Use the builtin recover function to check if there has been a panic or not.
-			if err := recover(); err != nil {
-				// If there was a panic, set a "Connection: close" header on the
-				// response. This acts as a trigger to make Go's HTTP server
-				// automatically close the current connection after a response has been
-				// sent.
-				w.Header().Set("Connection", "close")
-
-				// The value returned by recover() has the type any, so we use
-				// fmt.Errorf() to normalize it into an error and call our
-				// serverError() helper. In turn, this will log the error using
-				// our custom Logger type at the ERROR level and send the client a 500
-				// Internal Server Error response.
-				app.serverError(w, r, fmt.Errorf("%s", err))
-			}
-		}()
-
-		next.ServeHTTP(w, r)
-	})
+// Note that the errors parameter here has the type map[string]string, which is exactly  
+// the same as the errors map contained in our Validator type.
+func (app *application) failedValidationResponse(w http.ResponseWriter, r *http.Request, errors map[string]string) {
+    app.errorResponse(w, r, http.StatusUnprocessableEntity, errors)
 }
 ```
 
-### System generated error response
-Go’s http.Server may still automatically generate and send plain-text HTTP responses. These scenarios include when:
-- The HTTP request specifies an unsupported HTTP protocol version.
-- The HTTP request contains a missing or invalid Host header, or multiple Host headers.
-- The HTTP request contains a empty Content-Length header.
-- The HTTP request contains an unsupported Transfer-Encoding header.
-- The size of the HTTP request headers exceeds the server’s MaxHeaderBytes setting.
-- The client makes a HTTP request to a HTTPS server.  
+```go
+...
 
-> Unfortunately, these responses are hard-coded into the Go standard library, and there’s nothing we can do to customize them to use JSON instead.
+err := app.readJSON(w, r, &input)
+if err != nil {
+    app.badRequestResponse(w, r, err)
+    return
+}
 
-### Panic recovery in other goroutines
-It’s really important to realize that our middleware will only recover panics that happen in the same goroutine that executed the recoverPanic() middleware.
+// Initialize a new Validator instance.
+v := validator.New()
 
-If, for example, you have a handler which spins up another goroutine (e.g. to do some background processing), then any panics that happen in the background goroutine will not be recovered — not by the recoverPanic() middleware… and not by the panic recovery built into http.Server. These panics will cause your application to exit and bring down the server.
+// Use the Check() method to execute our validation checks. This will add the 
+// provided key and error message to the errors map if the check does not evaluate 
+// to true. For example, in the first line here we "check that the title is not 
+// equal to the empty string". In the second, we "check that the length of the title
+// is less than or equal to 500 bytes" and so on.
+v.Check(input.Title != "", "title", "must be provided")
+v.Check(len(input.Title) <= 500, "title", "must not be more than 500 bytes long")
 
-So, if you are spinning up additional goroutines from within your handlers and there is any chance of a panic, you must make sure that you recover any panics from within those goroutines too.
+v.Check(input.Year != 0, "year", "must be provided")
+v.Check(input.Year >= 1888, "year", "must be greater than 1888")
+v.Check(input.Year <= int32(time.Now().Year()), "year", "must not be in the future")
 
-We’ll look at this topic in more detail later in the book, and demonstrate how to deal with it when we use a background goroutine to send welcome emails to our API users.
+v.Check(input.Runtime != 0, "runtime", "must be provided")
+v.Check(input.Runtime > 0, "runtime", "must be a positive integer")
+
+v.Check(input.Genres != nil, "genres", "must be provided")
+v.Check(len(input.Genres) >= 1, "genres", "must contain at least 1 genre")
+v.Check(len(input.Genres) <= 5, "genres", "must not contain more than 5 genres")
+// Note that we're using the Unique helper in the line below to check that all 
+// values in the input.Genres slice are unique.
+v.Check(validator.Unique(input.Genres), "genres", "must not contain duplicate values")
+
+// Use the Valid() method to see if any of the checks failed. If they did, then use
+// the failedValidationResponse() helper to send a response to the client, passing 
+// in the v.Errors map.
+if !v.Valid() {
+    app.failedValidationResponse(w, r, v.Errors)
+    return
+}
+
+...
+```
+
+> note is entirely taken from the book. It can differ (greatly) than 
+my actual implementation.
+
+Now to try this out
+```shell
+$ BODY='{"title":"","year":1000,"runtime":"-123 mins","genres":["sci-fi","sci-fi"]}'
+$ curl -i -d "$BODY" localhost:4000/v1/movies
+HTTP/1.1 422 Unprocessable Entity
+Content-Type: application/json
+Date: Wed, 07 Apr 2021 10:33:57 GMT
+Content-Length: 180
+
+{
+    "error": {
+        "genres": "must not contain duplicate values",
+        "runtime": "must be a positive integer",
+        "title": "must be provided",
+        "year": "must be greater than 1888"
+    }
+}
+```
+
+
+
+
+
+
 
