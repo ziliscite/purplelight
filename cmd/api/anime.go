@@ -19,7 +19,7 @@ func (app *application) createAnimeHandler(w http.ResponseWriter, r *http.Reques
 		Type     data.AnimeType `json:"type,omitempty"`     // Anime type
 		Episodes *int32         `json:"episodes,omitempty"` // Number of episodes in the anime
 		Status   data.Status    `json:"status,omitempty"`   // Status of the anime
-		Season   data.Season    `json:"season,omitempty"`   // Season of the anime
+		Season   *data.Season   `json:"season,omitempty"`   // Season of the anime
 		Year     *int32         `json:"year,omitempty"`     // Year the anime was released
 		Duration *data.Duration `json:"duration,omitempty"` // Anime duration in minutes
 		Tags     []string       `json:"tags,omitempty"`     // Slice of genres for the anime (romance, comedy, etc.)
@@ -83,13 +83,14 @@ func (app *application) showAnimeHandler(w http.ResponseWriter, r *http.Request)
 	year := int32(2009)
 	eps := int32(64)
 	dur := data.Duration(24)
+	se := data.Spring
 	anime := data.Anime{
 		ID:        id,
 		Title:     "Fullmetal Alchemist: Brotherhood",
 		Type:      data.TV,
 		Episodes:  &eps,
 		Status:    data.Finished,
-		Season:    data.Spring,
+		Season:    &se,
 		Year:      &year,
 		Duration:  &dur,
 		Tags:      []string{"Action", "Adventure", "Fantasy"},
