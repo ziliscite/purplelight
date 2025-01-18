@@ -64,6 +64,11 @@ func (app *application) write(w http.ResponseWriter, code int, data envelope, he
 	return nil
 }
 
+var (
+	ErrBadlyFormattedJSON = errors.New("body contains badly-formed JSON")
+	ErrInvalidTypeJSON    = errors.New("body contains incorrect JSON type")
+)
+
 func (app *application) read(w http.ResponseWriter, r *http.Request, dst any) error {
 	// Use http.MaxBytesReader() to limit the size of the request body to 1MB.
 	maxBytes := 1_048_576
@@ -93,14 +98,14 @@ func (app *application) read(w http.ResponseWriter, r *http.Request, dst any) er
 		// *json.SyntaxError. If it does, then return a plain-english error message
 		// which includes the location of the problem.
 		case errors.As(err, &syntaxError):
-			return fmt.Errorf("body contains badly-formed JSON (at character %d)", syntaxError.Offset)
+			return fmt.Errorf("%w (at character %d)", ErrBadlyFormattedJSON, syntaxError.Offset)
 
 		// In some circumstances Decode() may also return an io.ErrUnexpectedEOF error
 		// for syntax errors in the JSON. So we check for this using errors.Is() and
 		// return a generic error message. There is an open issue regarding this at
 		// https://github.com/golang/go/issues/25956.
 		case errors.Is(err, io.ErrUnexpectedEOF):
-			return errors.New("body contains badly-formed JSON")
+			return ErrBadlyFormattedJSON
 
 		// Likewise, catch any *json.UnmarshalTypeError errors. These occur when the
 		// JSON value is the wrong type for the target destination. If the error relates
@@ -108,9 +113,9 @@ func (app *application) read(w http.ResponseWriter, r *http.Request, dst any) er
 		// easier for the client to debug.
 		case errors.As(err, &unmarshalTypeError):
 			if unmarshalTypeError.Field != "" {
-				return fmt.Errorf("body contains incorrect JSON type for field %q", unmarshalTypeError.Field)
+				return fmt.Errorf("%w for field %q", ErrInvalidTypeJSON, unmarshalTypeError.Field)
 			}
-			return fmt.Errorf("body contains incorrect JSON type (at character %d)", unmarshalTypeError.Offset)
+			return fmt.Errorf("%w (at character %d)", ErrInvalidTypeJSON, unmarshalTypeError.Offset)
 
 		// An io.EOF error will be returned by Decode() if the request body is empty. We
 		// check for this with errors.Is() and return a plain-english error message
@@ -126,7 +131,7 @@ func (app *application) read(w http.ResponseWriter, r *http.Request, dst any) er
 		// into a distinct error type in the future.
 		case strings.HasPrefix(err.Error(), "json: unknown field "):
 			fieldName := strings.TrimPrefix(err.Error(), "json: unknown field ")
-			return fmt.Errorf("body contains unknown key %s", fieldName)
+			return fmt.Errorf("body contains unknown key: '%s'", strings.Trim(fieldName, "\""))
 
 		// Use the errors.As() function to check whether the error has the type
 		// *http.MaxBytesError. If it does, then it means the request body exceeded our

@@ -2,7 +2,11 @@ package main
 
 import (
 	"flag"
+	"github.com/joho/godotenv"
+	"log"
+	"os"
 	"sync"
+	"time"
 )
 
 // Config Defines an config struct to hold all the configuration settings for our application.
@@ -13,6 +17,14 @@ import (
 type Config struct {
 	port int
 	env  string
+	db   struct {
+		dsn string
+		// Add maxOpenConns, maxIdleConns and maxIdleTime fields to hold the configuration
+		// settings for the connection pool.
+		maxOpenConns int
+		maxIdleConns int
+		maxIdleTime  time.Duration
+	}
 }
 
 var (
@@ -25,14 +37,30 @@ func GetConfig() Config {
 	once.Do(func() {
 		instance = Config{}
 
+		err := godotenv.Load()
+		if err != nil {
+			log.Fatal("Error loading .env file")
+		}
+
 		// Read the value of the port and env command-line flags into the config struct. We
 		// default to using the port number 4000 and the environment "development" if no
 		// corresponding flags are provided.
 		flag.IntVar(&instance.port, "port", 4000, "API server port")
 		flag.StringVar(&instance.env, "env", "development", "Environment (development|staging|production)")
+
+		// Read the DSN value from the db-dsn command-line flag into the config struct. We
+		// default to using our development DSN if no flag is provided.
+		flag.StringVar(&instance.db.dsn, "db-dsn", os.Getenv("PURPLELIGHT_DB_DSN"), "PostgreSQL DSN")
+
+		// Read the connection pool settings from command-line flags into the config struct.
+		// Notice that the default values we're using are the ones we discussed above?
+		flag.IntVar(&instance.db.maxOpenConns, "db-max-open-conns", 25, "PostgreSQL max open connections")
+		flag.IntVar(&instance.db.maxIdleConns, "db-max-idle-conns", 25, "PostgreSQL max idle connections")
+		flag.DurationVar(&instance.db.maxIdleTime, "db-max-idle-time", 15*time.Minute, "PostgreSQL max connection idle time")
+
 		flag.Parse()
 	})
-	
+
 	return instance
 }
 
@@ -44,4 +72,8 @@ func (c *Config) Port() int {
 // Env Returns the name of the current operating env for the application.
 func (c *Config) Env() string {
 	return c.env
+}
+
+func (c *Config) DSN() string {
+	return c.db.dsn
 }
