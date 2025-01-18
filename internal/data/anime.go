@@ -11,7 +11,7 @@ type Anime struct {
 	Type     AnimeType `json:"type,omitempty"`     // Anime type
 	Episodes *int32    `json:"episodes"`           // Number of episodes in the anime
 	Status   Status    `json:"status,omitempty"`   // Status of the anime
-	Season   Season    `json:"season,omitempty"`   // Season of the anime
+	Season   *Season   `json:"season,omitempty"`   // Season of the anime
 	Year     *int32    `json:"year"`               // Year the anime was released
 	Duration *Duration `json:"duration,omitempty"` // Anime duration in minutes
 	Tags     []string  `json:"tags,omitempty"`     // Slice of genres for the anime (romance, comedy, etc.)
@@ -38,8 +38,9 @@ func ValidateAnime(v *validator.Validator, a *Anime) {
 
 		v.Check(a.Episodes != nil, "episodes", "non upcoming anime episodes must be provided")
 
-		v.Check(a.Season != "", "season", "must be provided")
 		v.Check(a.Type != "", "type", "must be provided")
+
+		v.Check(a.Season != nil && *a.Season != "", "season", "must be provided")
 		v.Check(a.Duration != nil && *a.Duration != 0, "duration", "must be provided")
 	}
 
