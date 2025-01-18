@@ -15,8 +15,8 @@ const (
 	Winter Season = "Winter"
 )
 
-func (s *Season) String() string {
-	return string(*s)
+func (s Season) String() string {
+	return string(s)
 }
 
 func (s *Season) Set(value string) {
@@ -35,8 +35,8 @@ func (s *Season) Scan(value interface{}) error {
 	return nil
 }
 
-func (s *Season) Value() (driver.Value, error) {
-	return string(*s), nil
+func (s Season) Value() (driver.Value, error) {
+	return s.String(), nil
 }
 
 // UnmarshalJSON implements the json.Unmarshaler interface.

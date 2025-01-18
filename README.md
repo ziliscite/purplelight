@@ -421,3 +421,151 @@ $ curl -d '{"title": "Moana", "runtime": "107 minutes"}' localhost:4000/v1/movie
 }
 ```
 
+### Validating JSON Input
+
+In this section we learn to validate a json input
+- The movie title provided by the client is not empty and is not more than 500 bytes long.
+- The movie year is not empty and is between 1888 and the current year.
+- The movie runtime is not empty and is a positive integer.
+- The movie has between one and five (unique) genres.
+
+// of course, mine is anime, so I'll add more rules.
+
+First we create a validator package
+```go
+// Define a new Validator type which contains a map of validation errors.
+type Validator struct {
+    Errors map[string]string
+}
+
+// New is a helper which creates a new Validator instance with an empty errors map.
+func New() *Validator {
+    return &Validator{Errors: make(map[string]string)}
+}
+
+// Valid returns true if the errors map doesn't contain any entries.
+func (v *Validator) Valid() bool {
+    return len(v.Errors) == 0
+}
+
+// AddError adds an error message to the map (so long as no entry already exists for
+// the given key).
+func (v *Validator) AddError(key, message string) {
+    if _, exists := v.Errors[key]; !exists {
+        v.Errors[key] = message
+    }
+}
+
+// Check adds an error message to the map only if a validation check is not 'ok'.
+func (v *Validator) Check(ok bool, key, message string) {
+    if !ok {
+        v.AddError(key, message)
+    }
+}
+
+// Generic function which returns true if a specific value is in a list of permitted
+// values.
+func PermittedValue[T comparable](value T, permittedValues ...T) bool {
+    return slices.Contains(permittedValues, value)
+}
+
+// Matches returns true if a string value matches a specific regexp pattern.
+func Matches(value string, rx *regexp.Regexp) bool {
+    return rx.MatchString(value)
+}
+
+// Generic function which returns true if all values in a slice are unique.
+func Unique[T comparable](values []T) bool {
+    uniqueValues := make(map[T]bool)
+
+    for _, value := range values {
+        uniqueValues[value] = true
+    }
+
+    return len(values) == len(uniqueValues)
+}
+```
+
+To will then perform validation check, if it fails,
+we send 422 Unprocessable Entity status code and JSON response to the client.
+```go
+// Note that the errors parameter here has the type map[string]string, which is exactly  
+// the same as the errors map contained in our Validator type.
+func (app *application) failedValidationResponse(w http.ResponseWriter, r *http.Request, errors map[string]string) {
+    app.errorResponse(w, r, http.StatusUnprocessableEntity, errors)
+}
+```
+
+```go
+...
+
+err := app.readJSON(w, r, &input)
+if err != nil {
+    app.badRequestResponse(w, r, err)
+    return
+}
+
+// Initialize a new Validator instance.
+v := validator.New()
+
+// Use the Check() method to execute our validation checks. This will add the 
+// provided key and error message to the errors map if the check does not evaluate 
+// to true. For example, in the first line here we "check that the title is not 
+// equal to the empty string". In the second, we "check that the length of the title
+// is less than or equal to 500 bytes" and so on.
+v.Check(input.Title != "", "title", "must be provided")
+v.Check(len(input.Title) <= 500, "title", "must not be more than 500 bytes long")
+
+v.Check(input.Year != 0, "year", "must be provided")
+v.Check(input.Year >= 1888, "year", "must be greater than 1888")
+v.Check(input.Year <= int32(time.Now().Year()), "year", "must not be in the future")
+
+v.Check(input.Runtime != 0, "runtime", "must be provided")
+v.Check(input.Runtime > 0, "runtime", "must be a positive integer")
+
+v.Check(input.Genres != nil, "genres", "must be provided")
+v.Check(len(input.Genres) >= 1, "genres", "must contain at least 1 genre")
+v.Check(len(input.Genres) <= 5, "genres", "must not contain more than 5 genres")
+// Note that we're using the Unique helper in the line below to check that all 
+// values in the input.Genres slice are unique.
+v.Check(validator.Unique(input.Genres), "genres", "must not contain duplicate values")
+
+// Use the Valid() method to see if any of the checks failed. If they did, then use
+// the failedValidationResponse() helper to send a response to the client, passing 
+// in the v.Errors map.
+if !v.Valid() {
+    app.failedValidationResponse(w, r, v.Errors)
+    return
+}
+
+...
+```
+
+> note is entirely taken from the book. It can differ (greatly) than 
+my actual implementation.
+
+Now to try this out
+```shell
+$ BODY='{"title":"","year":1000,"runtime":"-123 mins","genres":["sci-fi","sci-fi"]}'
+$ curl -i -d "$BODY" localhost:4000/v1/movies
+HTTP/1.1 422 Unprocessable Entity
+Content-Type: application/json
+Date: Wed, 07 Apr 2021 10:33:57 GMT
+Content-Length: 180
+
+{
+    "error": {
+        "genres": "must not contain duplicate values",
+        "runtime": "must be a positive integer",
+        "title": "must be provided",
+        "year": "must be greater than 1888"
+    }
+}
+```
+
+
+
+
+
+
+

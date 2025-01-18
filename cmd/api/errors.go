@@ -52,6 +52,13 @@ func (app *application) methodNotAllowed(w http.ResponseWriter, r *http.Request)
 	app.error(w, r, http.StatusMethodNotAllowed, message)
 }
 
+// The badRequest() method will be used to send a 400 Bad Request status code
 func (app *application) badRequest(w http.ResponseWriter, r *http.Request, err error) {
 	app.error(w, r, http.StatusBadRequest, err.Error())
+}
+
+// Note that the errors parameter here has the type map[string]string, which is exactly
+// the same as the errors map contained in our Validator type.
+func (app *application) failedValidation(w http.ResponseWriter, r *http.Request, errors map[string]string) {
+	app.error(w, r, http.StatusUnprocessableEntity, errors)
 }
