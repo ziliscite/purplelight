@@ -241,6 +241,5 @@ func main() {
 
     ...
 }
-```
 
 Although this works — and it might initially seem appealing — tightly coupling the execution of migrations with your application source code can potentially be limiting and problematic in the longer term.
