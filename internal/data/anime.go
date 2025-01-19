@@ -21,11 +21,6 @@ type Anime struct {
 }
 
 func ValidateAnime(v *validator.Validator, a *Anime) {
-	// Use the Check() method to execute our validation checks. This will add the
-	// provided key and error message to the errors map if the check does not evaluate
-	// to true. For example, in the first line here we "check that the title is not
-	// equal to the empty string". In the second, we "check that the length of the title
-	// is less than or equal to 500 bytes" and so on.
 	v.Check(a.Title != "", "title", "must be provided")
 	v.Check(len(a.Title) <= 500, "title", "must not be more than 500 bytes long")
 
@@ -40,8 +35,15 @@ func ValidateAnime(v *validator.Validator, a *Anime) {
 
 		v.Check(a.Type != "", "type", "must be provided")
 
-		v.Check(a.Season != nil && *a.Season != "", "season", "must be provided")
 		v.Check(a.Duration != nil && *a.Duration != 0, "duration", "must be provided")
+	}
+
+	if a.Type == Movie {
+		v.Check(a.Episodes != nil && *a.Episodes == 1, "episodes", "must be 1 for movies, OVAs, and specials")
+	}
+
+	if a.Type == TV && a.Status != Upcoming {
+		v.Check(a.Season != nil && *a.Season != "", "season", "must be provided")
 	}
 
 	// upcoming and not nil (can nil)
@@ -66,7 +68,5 @@ func ValidateAnime(v *validator.Validator, a *Anime) {
 	v.Check(len(a.Tags) >= 1, "tags", "must contain at least 1 tag")
 	v.Check(len(a.Tags) <= 15, "tags", "must not contain more than 15 tags")
 
-	// Note that we're using the Unique helper in the line below to check that all
-	// values in the input.Genres slice are unique.
 	v.Check(validator.Unique(a.Tags), "tags", "must not contain duplicate values")
 }

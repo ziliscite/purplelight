@@ -10,7 +10,7 @@ CREATE TYPE season AS ENUM ('Spring', 'Summer', 'Fall', 'Winter');
 -- Create the Anime table using these enums
 CREATE TABLE anime (
     id SERIAL PRIMARY KEY,
-    title TEXT NOT NULL,
+    title TEXT NOT NULL UNIQUE,
     type anime_type NOT NULL,
     episodes INTEGER DEFAULT NULL,
     status status NOT NULL,
@@ -18,7 +18,7 @@ CREATE TABLE anime (
     year INTEGER DEFAULT NULL,
     duration INTEGER DEFAULT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    version INTEGER NOT NULL DEFAULT 0
+    version INTEGER NOT NULL DEFAULT 1
 );
 
 -- Create the Tag table

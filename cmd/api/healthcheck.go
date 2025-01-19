@@ -4,7 +4,7 @@ import (
 	"net/http"
 )
 
-func (app *application) healthcheckHandler(w http.ResponseWriter, r *http.Request) {
+func (app *application) healthcheck(w http.ResponseWriter, r *http.Request) {
 	response := struct {
 		Environment string `json:"environment"`
 		Version     string `json:"version"`

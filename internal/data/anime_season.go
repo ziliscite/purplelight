@@ -27,11 +27,16 @@ func (s *Season) Scan(value interface{}) error {
 	if value == nil {
 		return ErrNilValue
 	}
-	str, ok := value.(string)
-	if !ok {
-		return fmt.Errorf("%w Season: %T", ErrFailedScan, value)
+
+	switch v := value.(type) {
+	case string:
+		s.Set(v)
+	case []byte:
+		s.Set(string(v))
+	default:
+		return fmt.Errorf("%w AnimeSeason: %T", ErrFailedScan, value)
 	}
-	s.Set(str)
+	
 	return nil
 }
 

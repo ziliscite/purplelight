@@ -11,9 +11,9 @@ func (app *application) routes() http.Handler {
 	router.NotFound = http.HandlerFunc(app.notFound)
 	router.MethodNotAllowed = http.HandlerFunc(app.methodNotAllowed)
 
-	router.HandlerFunc(http.MethodGet, "/v1/healthcheck", app.healthcheckHandler)
-	router.HandlerFunc(http.MethodPost, "/v1/anime", app.createAnimeHandler)
-	router.HandlerFunc(http.MethodGet, "/v1/anime/:id", app.showAnimeHandler)
+	router.HandlerFunc(http.MethodGet, "/v1/healthcheck", app.healthcheck)
+	router.HandlerFunc(http.MethodPost, "/v1/anime", app.createAnime)
+	router.HandlerFunc(http.MethodGet, "/v1/anime/:id", app.showAnime)
 
-	return app.recoverPanic(router)
+	return app.recoverPanic(app.logging(router))
 }

@@ -1,28 +1,23 @@
 package main
 
 import (
+	"errors"
 	"github.com/ziliscite/purplelight/internal/data"
+	"github.com/ziliscite/purplelight/internal/repository"
 	"github.com/ziliscite/purplelight/internal/validator"
 	"net/http"
-	"time"
 )
 
-// Add a createAnimeHandler for the "POST /v1/anime" endpoint. For now we simply
-// return a plain-text placeholder response.
-func (app *application) createAnimeHandler(w http.ResponseWriter, r *http.Request) {
-	// Declare an anonymous struct to hold the information that we expect to be in the
-	// HTTP request body (note that the field names and types in the struct are a subset
-	// of the struct that we created earlier). This struct will be our *target
-	// decode destination*.
+func (app *application) createAnime(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Title    string         `json:"title"`              // Anime title
-		Type     data.AnimeType `json:"type,omitempty"`     // Anime type
-		Episodes *int32         `json:"episodes,omitempty"` // Number of episodes in the anime
-		Status   data.Status    `json:"status,omitempty"`   // Status of the anime
-		Season   *data.Season   `json:"season,omitempty"`   // Season of the anime
-		Year     *int32         `json:"year,omitempty"`     // Year the anime was released
-		Duration *data.Duration `json:"duration,omitempty"` // Anime duration in minutes
-		Tags     []string       `json:"tags,omitempty"`     // Slice of genres for the anime (romance, comedy, etc.)
+		Title    string         `json:"title"`
+		Type     data.AnimeType `json:"type,omitempty"`
+		Episodes *int32         `json:"episodes,"`
+		Status   data.Status    `json:"status,omitempty"`
+		Season   *data.Season   `json:"season,"`
+		Year     *int32         `json:"year,"`
+		Duration *data.Duration `json:"duration,"`
+		Tags     []string       `json:"tags,omitempty"`
 	}
 
 	err := app.read(w, r, &request)
@@ -31,7 +26,6 @@ func (app *application) createAnimeHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Initialize a new Validator instance.
 	v := validator.New()
 
 	anime := &data.Anime{
@@ -45,18 +39,21 @@ func (app *application) createAnimeHandler(w http.ResponseWriter, r *http.Reques
 		Tags:     request.Tags,
 	}
 
-	// Call the ValidateAnime() function and return a response containing the errors if
-	// any of the checks fail.
 	if data.ValidateAnime(v, anime); !v.Valid() {
 		app.failedValidation(w, r, v.Errors)
 		return
 	}
 
-	// Use the Valid() method to see if any of the checks failed. If they did, then use
-	// the failedValidation() helper to send a response to the client, passing
-	// in the v.Errors map.
-	if !v.Valid() {
-		app.failedValidation(w, r, v.Errors)
+	err = app.repos.Anime.InsertAnime(anime)
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrDuplicateEntry):
+			app.error(w, r, http.StatusConflict, map[string]string{"title": "anime title already exists"})
+		case !errors.Is(err, repository.ErrInternalDatabase), !errors.Is(err, repository.ErrTransaction), !errors.Is(err, repository.ErrDatabaseUnknown), !errors.Is(err, repository.ErrQueryPrepare), !errors.Is(err, repository.ErrFailedCloseStmt):
+			app.badRequest(w, r, err)
+		default:
+			app.serverError(w, r, err)
+		}
 		return
 	}
 
@@ -66,43 +63,26 @@ func (app *application) createAnimeHandler(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// Add a showAnimeHandler for the "GET /v1/anime/:id" endpoint. For now, we retrieve
-// the interpolated "id" parameter from the current URL and include it in a placeholder
-// response.
-func (app *application) showAnimeHandler(w http.ResponseWriter, r *http.Request) {
-	// If the parameter couldn't be converted, or is less than 1, we know the ID is invalid
-	// so we use the http.NotFound() function to return a 404 Not Found response.
+func (app *application) showAnime(w http.ResponseWriter, r *http.Request) {
 	id, err := app.readID(r)
 	if err != nil {
-		// Use the new notFoundResponse() helper.
 		app.notFound(w, r)
 		return
 	}
 
-	// Otherwise, interpolate the anime ID in a placeholder response.
-	year := int32(2009)
-	eps := int32(64)
-	dur := data.Duration(24)
-	se := data.Spring
-	anime := data.Anime{
-		ID:        id,
-		Title:     "Fullmetal Alchemist: Brotherhood",
-		Type:      data.TV,
-		Episodes:  &eps,
-		Status:    data.Finished,
-		Season:    &se,
-		Year:      &year,
-		Duration:  &dur,
-		Tags:      []string{"Action", "Adventure", "Fantasy"},
-		CreatedAt: time.Now(),
-		Version:   1,
+	anime, err := app.repos.Anime.GetAnime(id)
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrRecordNotFound):
+			app.notFound(w, r)
+		default:
+			app.serverError(w, r, err)
+		}
+		return
 	}
 
-	// Create an envelope{"movie": movie} instance and pass it to writeJSON(), instead
-	// of passing the plain movie struct.
 	err = app.write(w, http.StatusOK, envelope{"anime": anime}, nil)
 	if err != nil {
-		// Use the new serverErrorResponse() helper.
 		app.serverError(w, r, err)
 	}
 }

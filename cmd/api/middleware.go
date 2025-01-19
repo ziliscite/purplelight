@@ -28,3 +28,33 @@ func (app *application) recoverPanic(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+func (app *application) logging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rw := &responseWriter{w, http.StatusOK}
+
+		defer func() {
+			app.logger.Info("debugging info",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", rw.status,
+			)
+		}()
+
+		next.ServeHTTP(rw, r)
+	})
+}
+
+type responseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rw *responseWriter) WriteHeader(status int) {
+	rw.status = status
+	rw.ResponseWriter.WriteHeader(status)
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	return rw.ResponseWriter.Write(b)
+}

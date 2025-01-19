@@ -21,9 +21,8 @@ type Config struct {
 		dsn string
 		// Add maxOpenConns, maxIdleConns and maxIdleTime fields to hold the configuration
 		// settings for the connection pool.
-		maxOpenConns int
-		maxIdleConns int
-		maxIdleTime  time.Duration
+		maxConns    int
+		maxIdleTime time.Duration
 	}
 }
 
@@ -54,8 +53,7 @@ func GetConfig() Config {
 
 		// Read the connection pool settings from command-line flags into the config struct.
 		// Notice that the default values we're using are the ones we discussed above?
-		flag.IntVar(&instance.db.maxOpenConns, "db-max-open-conns", 25, "PostgreSQL max open connections")
-		flag.IntVar(&instance.db.maxIdleConns, "db-max-idle-conns", 25, "PostgreSQL max idle connections")
+		flag.IntVar(&instance.db.maxConns, "db-max-open-conns", 25, "PostgreSQL max connections")
 		flag.DurationVar(&instance.db.maxIdleTime, "db-max-idle-time", 15*time.Minute, "PostgreSQL max connection idle time")
 
 		flag.Parse()
