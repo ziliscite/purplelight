@@ -24,7 +24,7 @@ CREATE TABLE anime (
 -- Create the Tag table
 CREATE TABLE tag (
     id SERIAL PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
+    name VARCHAR(255) UNIQUE NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 

@@ -6,7 +6,7 @@ import (
 )
 
 type Anime struct {
-	ID       int64     `json:"id"`                 // Unique integer ID for the anime
+	ID       int32     `json:"id"`                 // Unique integer ID for the anime
 	Title    string    `json:"title"`              // Anime title
 	Type     AnimeType `json:"type,omitempty"`     // Anime type
 	Episodes *int32    `json:"episodes"`           // Number of episodes in the anime
