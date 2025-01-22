@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"github.com/ziliscite/purplelight/internal/repository"
 	"net/http"
 )
 
@@ -61,4 +63,30 @@ func (app *application) badRequest(w http.ResponseWriter, r *http.Request, err e
 // the same as the errors map contained in our Validator type.
 func (app *application) failedValidation(w http.ResponseWriter, r *http.Request, errors map[string]string) {
 	app.error(w, r, http.StatusUnprocessableEntity, errors)
+}
+
+func (app *application) dbWriteError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, repository.ErrDuplicateEntry):
+		app.error(w, r, http.StatusConflict, "anime title already exists")
+	case errors.Is(err, repository.ErrDeadlockDetected):
+		app.error(w, r, http.StatusConflict, "deadlock detected while trying to insert anime")
+	case errors.Is(err, repository.ErrTooManyRows) ||
+		errors.Is(err, repository.ErrNotNullViolation) ||
+		errors.Is(err, repository.ErrStringDataTruncation) ||
+		errors.Is(err, repository.ErrDataTypeMismatch) ||
+		errors.Is(err, repository.ErrForeignKeyViolation):
+		app.badRequest(w, r, err)
+	default:
+		app.serverError(w, r, err)
+	}
+}
+
+func (app *application) dbReadError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, repository.ErrRecordNotFound):
+		app.notFound(w, r)
+	default:
+		app.serverError(w, r, err)
+	}
 }
