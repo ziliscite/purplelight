@@ -5,6 +5,7 @@ import (
 	"github.com/ziliscite/purplelight/internal/data"
 	"github.com/ziliscite/purplelight/internal/validator"
 	"net/http"
+	"strconv"
 )
 
 func (app *application) createAnime(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +78,15 @@ func (app *application) updateAnime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If the request contains a X-Expected-Version header, verify that the movie
+	// version in the database matches the expected version specified in the header.
+	if r.Header.Get("X-Expected-Version") != "" {
+		if strconv.Itoa(int(anime.Version)) != r.Header.Get("X-Expected-Version") {
+			app.editConflict(w, r)
+			return
+		}
+	}
+
 	var request animeRequest
 	err = app.read(w, r, &request)
 	if err != nil {
@@ -142,6 +152,13 @@ func (app *application) partiallyUpdateAnime(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		app.dbReadError(w, r, err)
 		return
+	}
+
+	if r.Header.Get("X-Expected-Version") != "" {
+		if strconv.Itoa(int(anime.Version)) != r.Header.Get("X-Expected-Version") {
+			app.editConflict(w, r)
+			return
+		}
 	}
 
 	var request animeRequest

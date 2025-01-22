@@ -8,6 +8,7 @@ import (
 )
 
 var (
+	ErrEditConflict         = errors.New("edit conflict")
 	ErrTooManyRows          = errors.New("too many rows returned")
 	ErrRecordNotFound       = errors.New("record not found")
 	ErrDuplicateEntry       = errors.New("duplicate entry")

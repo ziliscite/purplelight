@@ -65,12 +65,17 @@ func (app *application) failedValidation(w http.ResponseWriter, r *http.Request,
 	app.error(w, r, http.StatusUnprocessableEntity, errors)
 }
 
+func (app *application) editConflict(w http.ResponseWriter, r *http.Request) {
+	message := "unable to proceed due to a edit conflict, please try again"
+	app.error(w, r, http.StatusConflict, message)
+}
+
 func (app *application) dbWriteError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, repository.ErrDuplicateEntry):
 		app.error(w, r, http.StatusConflict, "anime title already exists")
-	case errors.Is(err, repository.ErrDeadlockDetected):
-		app.error(w, r, http.StatusConflict, "deadlock detected while trying to insert anime")
+	case errors.Is(err, repository.ErrDeadlockDetected) || errors.Is(err, repository.ErrEditConflict):
+		app.editConflict(w, r)
 	case errors.Is(err, repository.ErrTooManyRows) ||
 		errors.Is(err, repository.ErrNotNullViolation) ||
 		errors.Is(err, repository.ErrStringDataTruncation) ||
