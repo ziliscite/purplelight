@@ -173,7 +173,7 @@ func (app *application) updateAnime(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (app *application) deleteMovieHandler(w http.ResponseWriter, r *http.Request) {
+func (app *application) deleteAnime(w http.ResponseWriter, r *http.Request) {
 	// Extract the movie ID from the URL.
 	id, err := app.readID(r)
 	if err != nil {

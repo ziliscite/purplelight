@@ -41,6 +41,8 @@ func (l *dbLogger) handleError(err error) error {
 		switch pgErr.Code {
 		case "23505": // Unique constraint violation
 			return ErrDuplicateEntry
+		case "42P05":
+			return ErrDuplicateEntry
 		case "23503": // Foreign key violation
 			return ErrForeignKeyViolation
 		case "23502": // Not-null violation

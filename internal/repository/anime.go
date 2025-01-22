@@ -50,7 +50,7 @@ func (a AnimeRepository) InsertAnime(anime *data.Anime) error {
 	}()
 
 	// Insert anime through the main transaction
-	animeStmt, err := tx.Prepare(ctx, "anime", `
+	animeStmt, err := tx.Prepare(ctx, "insert anime", `
 		INSERT INTO anime (title, type, episodes, status, season, year, duration)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, created_at, version
@@ -108,7 +108,7 @@ func (a AnimeRepository) GetAnime(id int32) (*data.Anime, error) {
 		}
 	}()
 
-	animeStmt, err := tx.Prepare(ctx, "anime", `
+	animeStmt, err := tx.Prepare(ctx, "get anime", `
 		SELECT * FROM anime WHERE id = $1
 	`)
 	if err != nil {
@@ -162,7 +162,7 @@ func (a AnimeRepository) UpdateAnime(anime *data.Anime) error {
 		}
 	}()
 
-	animeStmt, err := tx.Prepare(ctx, "anime", `
+	animeStmt, err := tx.Prepare(ctx, "update anime", `
 		UPDATE anime 
 		SET title = $1, type = $2, episodes = $3, 
 		    status = $4, season = $5, year = $6, 
@@ -176,7 +176,7 @@ func (a AnimeRepository) UpdateAnime(anime *data.Anime) error {
 	}
 
 	// Update anime record
-	err = tx.QueryRow(ctx, animeStmt.SQL, anime.Title, anime.Type, anime.Episodes, anime.Status, anime.Season, anime.Year, anime.Duration).
+	err = tx.QueryRow(ctx, animeStmt.SQL, anime.Title, anime.Type, anime.Episodes, anime.Status, anime.Season, anime.Year, anime.Duration, anime.ID).
 		Scan(&anime.Version)
 	if err != nil {
 		return a.logger.handleError(err)
