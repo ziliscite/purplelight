@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ziliscite/purplelight/internal/data"
+	"strings"
 	"time"
 )
 
@@ -36,8 +37,7 @@ func (a AnimeRepository) InsertAnime(anime *data.Anime) error {
 
 	tx, err := a.db.BeginTx(ctx, opts)
 	if err != nil {
-		a.logger.Error(ErrTransaction.Error(), "error", err)
-		return ErrTransaction
+		return a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
 	}
 
 	defer func() {
@@ -113,7 +113,6 @@ func (a AnimeRepository) GetAnime(id int32) (*data.Anime, error) {
 	`)
 	if err != nil {
 		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrQueryPrepare, err.Error()))
-
 	}
 
 	var anime data.Anime
@@ -131,11 +130,134 @@ func (a AnimeRepository) GetAnime(id int32) (*data.Anime, error) {
 	anime.Tags = tags
 
 	if err := tx.Commit(ctx); err != nil {
-		a.logger.Error(ErrTransaction.Error(), "error", err)
-		return nil, ErrTransaction
+		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
 	}
 
 	return &anime, nil
+}
+
+func (a AnimeRepository) GetAll(title string, status string, season string, animeType string, tags []string, filters data.Filters) ([]*data.Anime, error) {
+	opts := pgx.TxOptions{
+		IsoLevel:   pgx.Serializable,
+		AccessMode: pgx.ReadOnly,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	tx, err := a.db.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
+	}
+
+	defer func() {
+		if err != nil {
+			// Rollback if an error occurs during the transaction
+			if rbErr := tx.Rollback(ctx); rbErr != nil {
+				a.logger.Error(ErrTransaction.Error(), "error", rbErr)
+			}
+		}
+	}()
+
+	baseQuery := `
+	SELECT
+		a.id, a.title, a.type, a.episodes,
+		a.status, a.season, a.year, a.duration,
+		ARRAY_AGG(t.name ORDER BY t.name) AS tags,
+		a.created_at, a.version
+	FROM anime a
+	JOIN anime_tags at ON a.id = at.anime_id
+	JOIN tag t ON at.tag_id = t.id
+	WHERE 1=1 
+	`
+
+	var args []interface{}
+	var conditions []string
+
+	if title != "" {
+		// Add wildcards in Go, use $n placeholder
+		//conditions = append(conditions, fmt.Sprintf("a.title ILIKE $%d", len(args)+1))
+		//args = append(args, "%"+title+"%") // Wildcard added here
+
+		conditions = append(conditions, fmt.Sprintf(`to_tsvector('simple', a.title) @@ plainto_tsquery('simple', $%d)`, len(args)+1))
+		args = append(args, title)
+	}
+
+	if status != "" {
+		conditions = append(conditions, fmt.Sprintf("a.status = $%d", len(args)+1))
+		args = append(args, status)
+	}
+
+	if season != "" {
+		conditions = append(conditions, fmt.Sprintf("a.season = $%d", len(args)+1))
+		args = append(args, season)
+	}
+
+	if animeType != "" {
+		conditions = append(conditions, fmt.Sprintf("a.type = $%d", len(args)+1))
+		args = append(args, animeType)
+	}
+
+	// Combine query parts
+	query := baseQuery
+	if len(conditions) > 0 {
+		query += " AND " + strings.Join(conditions, " AND ")
+	}
+
+	if len(tags) > 0 {
+		placeholders := make([]string, len(tags))
+		for i := range tags {
+			placeholders[i] = fmt.Sprintf("$%d", len(args)+i+1)
+		}
+
+		query = fmt.Sprintf(`
+			WITH valid_anime AS (
+			SELECT at.anime_id
+			FROM anime_tags at
+			JOIN tag t ON at.tag_id = t.id
+			WHERE t.name IN (%s)
+			GROUP BY at.anime_id
+			HAVING COUNT(DISTINCT t.name) = %d
+		)`, strings.Join(placeholders, ", "), len(tags)) + query
+
+		for _, t := range tags {
+			args = append(args, strings.Title(t))
+		}
+
+		query += fmt.Sprintf(" AND a.id IN (SELECT v.anime_id FROM valid_anime v)")
+	}
+
+	query += fmt.Sprintf(" GROUP BY a.id, a.title, a.type, a.episodes, a.status, a.season, a.year, a.duration, a.created_at, a.version;")
+
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, a.logger.handleError(err)
+	}
+	defer rows.Close()
+
+	// Check if there are any rows
+	if !rows.Next() {
+		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrRecordNotFound, "anime not found"))
+	}
+
+	anime := make([]*data.Anime, 0)
+	for rows.Next() {
+		var an data.Anime
+		if err = rows.Scan(
+			&an.ID, &an.Title, &an.Type, &an.Episodes,
+			&an.Status, &an.Season, &an.Year, &an.Duration,
+			&an.Tags, &an.CreatedAt, &an.Version,
+		); err != nil {
+			return nil, a.logger.handleError(err)
+		}
+		anime = append(anime, &an)
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
+	}
+
+	return anime, nil
 }
 
 // UpdateAnime Add a placeholder method for updating a specific record in the movies table.
@@ -150,8 +272,7 @@ func (a AnimeRepository) UpdateAnime(anime *data.Anime) error {
 
 	tx, err := a.db.BeginTx(ctx, opts)
 	if err != nil {
-		a.logger.Error(ErrTransaction.Error(), "error", err)
-		return nil
+		return a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
 	}
 
 	defer func() {
@@ -172,8 +293,7 @@ func (a AnimeRepository) UpdateAnime(anime *data.Anime) error {
 		RETURNING version
 	`)
 	if err != nil {
-		a.logger.Error(ErrQueryPrepare.Error(), "error", err)
-		return ErrQueryPrepare
+		return a.logger.handleError(fmt.Errorf("%w: %s", ErrQueryPrepare, err.Error()))
 	}
 
 	// Update anime record
@@ -208,9 +328,8 @@ func (a AnimeRepository) UpdateAnime(anime *data.Anime) error {
 	}
 
 	// Commit transaction
-	if err := tx.Commit(ctx); err != nil {
-		a.logger.Error(ErrTransaction.Error(), "error", err)
-		return ErrTransaction
+	if err = tx.Commit(ctx); err != nil {
+		return a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
 	}
 
 	return nil
@@ -234,8 +353,7 @@ func (a AnimeRepository) DeleteAnime(id int32) error {
 
 	tx, err := a.db.BeginTx(ctx, opts)
 	if err != nil {
-		a.logger.Error(ErrTransaction.Error(), "error", err)
-		return nil
+		return a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
 	}
 
 	defer func() {
@@ -261,7 +379,7 @@ func (a AnimeRepository) DeleteAnime(id int32) error {
 	// with the provided ID at the moment we tried to delete it. In that case we
 	// return an ErrRecordNotFound error.
 	if rowsAffected == 0 {
-		return ErrRecordNotFound
+		return a.logger.handleError(fmt.Errorf("%w: %s", ErrRecordNotFound, "no rows affected"))
 	}
 
 	err = a.deleteAnimeTags(id, tx)
@@ -270,9 +388,8 @@ func (a AnimeRepository) DeleteAnime(id int32) error {
 	}
 
 	// Commit transaction
-	if err := tx.Commit(ctx); err != nil {
-		a.logger.Error(ErrTransaction.Error(), "error", err)
-		return ErrTransaction
+	if err = tx.Commit(ctx); err != nil {
+		return a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
 	}
 
 	return nil
@@ -349,11 +466,11 @@ func (a AnimeRepository) getAnimeTags(id int32, tx pgx.Tx) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	defer rows.Close()
+
 	for rows.Next() {
 		var tag string
-		if err := rows.Scan(&tag); err != nil {
+		if err = rows.Scan(&tag); err != nil {
 			return nil, err
 		}
 		tags = append(tags, tag)
@@ -387,3 +504,52 @@ func (a AnimeRepository) insertAnimeTags(id int32, tagsIds []int32, tx pgx.Tx) e
 
 	return nil
 }
+
+// I'll just gonna put this here
+/*
+-- for tags > 0
+WITH valid_anime AS (
+    SELECT at.anime_id
+    FROM anime_tags at
+    JOIN tag t ON at.tag_id = t.id
+    WHERE t.name IN ('Action', 'Isekai')
+    GROUP BY at.anime_id
+    HAVING COUNT(DISTINCT t.name) = 2
+)
+SELECT
+    a.id, a.title, a.type, a.episodes,
+    a.status, a.season, a.year, a.duration,
+    ARRAY_AGG(t.name ORDER BY t.name) AS tags,
+    a.created_at, a.version
+FROM anime a
+JOIN anime_tags at ON a.id = at.anime_id
+JOIN tag t ON at.tag_id = t.id
+WHERE a.title ILIKE '%Tanya%' AND a.type = 'OVA' AND a.id IN (SELECT v.anime_id FROM valid_anime v)
+GROUP BY a.id, a.title, a.type, a.episodes, a.status, a.season, a.year, a.duration, a.created_at, a.version;
+
+SELECT
+    a.id, a.title, a.type, a.episodes,
+    a.status, a.season, a.year, a.duration,
+    ARRAY_AGG(t.name ORDER BY t.name) AS tags,
+    a.created_at, a.version
+FROM anime a
+JOIN anime_tags at ON a.id = at.anime_id
+JOIN tag t ON at.tag_id = t.id
+WHERE 1=1
+GROUP BY a.id, a.title, a.type, a.episodes, a.status, a.season, a.year, a.duration, a.created_at, a.version;
+
+-- without
+SELECT
+    a.id, a.title, a.type, a.episodes,
+    a.status, a.season, a.year, a.duration,
+    ARRAY_AGG(t.name ORDER BY t.name) AS tags,
+    a.created_at, a.version
+FROM anime a
+JOIN anime_tags at ON a.id = at.anime_id
+JOIN tag t ON at.tag_id = t.id
+WHERE to_tsvector('simple', a.title) @@ to_tsquery('simple', 'Fullmetal | Tanya') AND a.type = 'TV'
+GROUP BY a.id, a.title, a.type, a.episodes, a.status, a.season, a.year, a.duration, a.created_at, a.version;
+
+-- could also use this for AND
+(to_tsvector('simple', title) @@ plainto_tsquery('simple', $1)
+*/

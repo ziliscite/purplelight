@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ziliscite/purplelight/internal/data"
+	"github.com/ziliscite/purplelight/internal/validator"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -50,7 +53,7 @@ func (app *application) write(w http.ResponseWriter, code int, data envelope, he
 	// response, so it's safe to add any headers that we want to include. We loop
 	// through the header map and add each header to the http.ResponseWriter header map.
 	// Note that it's OK if the provided header map is nil. Go doesn't throw an error
-	// if you try to range over (or generally, read from) a nil map.
+	// if you try to range over (or generally, readBody from) a nil map.
 	for key, value := range headers {
 		w.Header()[key] = value
 	}
@@ -69,7 +72,7 @@ var (
 	ErrInvalidTypeJSON    = errors.New("body contains incorrect JSON type")
 )
 
-func (app *application) read(w http.ResponseWriter, r *http.Request, dst any) error {
+func (app *application) readBody(w http.ResponseWriter, r *http.Request, dst any) error {
 	// Use http.MaxBytesReader() to limit the size of the request body to 1MB.
 	maxBytes := 1_048_576
 	r.Body = http.MaxBytesReader(w, r.Body, int64(maxBytes))
@@ -165,4 +168,83 @@ func (app *application) read(w http.ResponseWriter, r *http.Request, dst any) er
 	}
 
 	return nil
+}
+
+// The readString() helper returns a string value from the query string, or the provided
+// default value if no matching key could be found.
+func (app *application) readString(qs url.Values, key string, defaultValue string) string {
+	// Extract the value for a given key from the query string. If no key exists this
+	// will return the empty string "".
+	s := qs.Get(key)
+
+	// If no key exists (or the value is empty) then return the default value.
+	if s == "" {
+		return defaultValue
+	}
+
+	// Otherwise return the string.
+	return s
+}
+
+// The readIota() helper returns a valid string value from the query string corresponding to accepted values.
+func (app *application) readIota(qs url.Values, key string, defaultValue string, types data.Enumify, v *validator.Validator) string {
+	// Extract the value for a given key from the query string. If no key exists this
+	// will return the empty string "".
+	s := qs.Get(key)
+
+	// If no key exists (or the value is empty) then return the default value.
+	if s == "" {
+		return defaultValue
+	}
+
+	// Validate the string to the iota.
+	st, err := types.ToEnum(s)
+	if err != nil {
+		v.AddError(key, err.Error())
+		return defaultValue
+	}
+
+	// Otherwise return the string.
+	return st
+}
+
+// The readCSV() helper reads a string value from the query string and then splits it
+// into a slice on the comma character. If no matching key could be found, it returns
+// the provided default value.
+func (app *application) readCSV(qs url.Values, key string, defaultValue []string) []string {
+	// Extract the value from the query string.
+	csv := qs.Get(key)
+
+	// If no key exists (or the value is empty) then return the default value.
+	if csv == "" {
+		return defaultValue
+	}
+
+	// Otherwise parse the value into a []string slice and return it.
+	return strings.Split(csv, ",")
+}
+
+// The readInt() helper reads a string value from the query string and converts it to an
+// integer before returning. If no matching key could be found it returns the provided
+// default value. If the value couldn't be converted to an integer, then we record an
+// error message in the provided Validator instance.
+func (app *application) readInt(qs url.Values, key string, defaultValue int, v *validator.Validator) int {
+	// Extract the value from the query string.
+	s := qs.Get(key)
+
+	// If no key exists (or the value is empty) then return the default value.
+	if s == "" {
+		return defaultValue
+	}
+
+	// Try to convert the value to an int. If this fails, add an error message to the
+	// validator instance and return the default value.
+	i, err := strconv.Atoi(s)
+	if err != nil {
+		v.AddError(key, "must be an integer value")
+		return defaultValue
+	}
+
+	// Otherwise, return the converted integer value.
+	return i
 }

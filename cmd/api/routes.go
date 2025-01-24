@@ -13,6 +13,7 @@ func (app *application) routes() http.Handler {
 
 	router.HandlerFunc(http.MethodGet, "/v1/healthcheck", app.healthcheck)
 	router.HandlerFunc(http.MethodPost, "/v1/anime", app.createAnime)
+	router.HandlerFunc(http.MethodGet, "/v1/anime", app.listAnime)
 	router.HandlerFunc(http.MethodGet, "/v1/anime/:id", app.showAnime)
 	router.HandlerFunc(http.MethodPut, "/v1/anime/:id", app.updateAnime)
 	router.HandlerFunc(http.MethodPatch, "/v1/anime/:id", app.partiallyUpdateAnime)

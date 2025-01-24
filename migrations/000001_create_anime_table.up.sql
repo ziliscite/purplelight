@@ -35,4 +35,3 @@ CREATE TABLE anime_tags (
     PRIMARY KEY (anime_id, tag_id)
 );
 
-
