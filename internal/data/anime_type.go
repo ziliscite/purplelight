@@ -28,11 +28,16 @@ func (a *AnimeType) Scan(value interface{}) error {
 	if value == nil {
 		return ErrNilValue
 	}
-	str, ok := value.(string)
-	if !ok {
+
+	switch v := value.(type) {
+	case string:
+		a.Set(v)
+	case []byte:
+		a.Set(string(v))
+	default:
 		return fmt.Errorf("%w AnimeType: %T", ErrFailedScan, value)
 	}
-	a.Set(str)
+	
 	return nil
 }
 

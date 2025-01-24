@@ -14,7 +14,7 @@ import (
 
 // Retrieve the "id" URL parameter, convert it to an integer, and return it.
 // If the operation isn't successful, return 0 and an error.
-func (app *application) readID(r *http.Request) (int64, error) {
+func (app *application) readID(r *http.Request) (int32, error) {
 	// When httprouter is parsing a request, any interpolated URL parameters will be
 	// stored in the request context. We can use the ParamsFromContext() function to
 	// retrieve a slice containing these parameter names and values.
@@ -23,12 +23,12 @@ func (app *application) readID(r *http.Request) (int64, error) {
 	// We can then use the ByName() method to get the value of the "id" parameter from
 	// the slice. In our project all movies will have a unique positive integer ID, but
 	// the value returned by ByName() is always a string. So we try to convert it to a base 10 integer (with a bit size of 64).
-	id, err := strconv.ParseInt(params.ByName("id"), 10, 64)
+	id, err := strconv.ParseInt(params.ByName("id"), 10, 32)
 	if err != nil || id < 1 {
 		return 0, errors.New("invalid id parameter")
 	}
 
-	return id, nil
+	return int32(id), nil
 }
 
 type envelope map[string]any

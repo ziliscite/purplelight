@@ -1,245 +1,559 @@
-# Chapter 6
+# Chapter 7. CRUD Operations
 
-We’re going to explore how to use SQL migrations to create the table (and more generally, manage database schema changes throughout the project).
-- The high-level principles behind SQL migrations and why they are useful.
-- How to use the command-line migrate tool to programmatically manage changes to your database schema.
+Endpoints  
 
-## Overview of SQL Migrations
-#### Very high-level concept
-- For every change that you want to make to your database schema (like creating a table, adding a column, or removing an unused index) you create a pair of migration files. One file is the ‘up’ migration which contains the SQL statements necessary to implement the change, and the other is a ‘down’ migration which contains the SQL statements to reverse (or roll-back) the change.
-- Each pair of migration files is numbered sequentially, usually 0001, 0002, 0003... or with a Unix timestamp, to indicate the order in which migrations should be applied to a database.
-- You use some kind of tool or script to execute or rollback the SQL statements in the sequential migration files against your database. The tool keeps track of which migrations have already been applied, so that only the necessary SQL statements are actually executed.
+| Method | URL Pattern | Handler | Action |
+| --- | --- | --- | --- |
+| GET | /v1/healthcheck | healthcheckHandler | Show application information |
+| POST | /v1/movies | createMovieHandler | Create a new movie |
+| GET | /v1/movies/:id | showMovieHandler | Show the details of a specific movie |
+| PUT | /v1/movies/:id | updateMovieHandler | UpdateAnime the details of a specific movie |
+| DELETE | /v1/movies/:id | deleteMovieHandler | Delete a specific movie |
 
-#### Schema benefits
-- The database schema (along with its evolution and changes) is completely described by the ‘up’ and ‘down’ SQL migration files. And because these are just regular files containing some SQL statements, they can be included and tracked alongside the rest of your code in a version control system.
-- It’s possible to replicate the current database schema precisely on another machine by running the necessary ‘up’ migrations. This is a big help when you need to manage and synchronize database schemas in different environments (development, testing, production, etc.).
-- It’s possible to roll-back database schema changes if necessary by applying the appropriate ‘down’ migrations.
+// change movie to anime, of course
 
-### Installing the migrate tool
-macOS
-```shell
-$ brew install golang-migrate
-```
+Key takeaways
+- How to create a database model which isolates all the logic for executing SQL queries against your database.
+- How to implement the four basic CRUD (create, read, update and delete) operations on a specific resource in the context of an API.
 
-Linux & Windows
-```shell
-$ cd /tmp
-$ curl -L https://github.com/golang-migrate/migrate/releases/download/v4.16.2/migrate.linux-amd64.tar.gz | tar xvz
-$ mv migrate ~/go/bin/
-```
-
-## Working with SQL Migrations
-The first thing we need to do is generate a pair of migration files using the migrate create command
-```shell
-migrate create -seq -ext sql -dir migrations create_anime_table
-```
-
-At the moment these two new files are completely empty. Let’s edit the ‘up’ migration file to contain the necessary CREATE TABLE statement for our movies table, like so:
-```sql
--- Define AnimeType enum
-CREATE TYPE anime_type AS ENUM ('TV', 'Movie', 'OVA', 'ONA', 'Special');
-
--- Define Status enum
-CREATE TYPE status AS ENUM ('Ongoing', 'Finished', 'Upcoming');
-
--- Define Season enum
-CREATE TYPE season AS ENUM ('Spring', 'Summer', 'Fall', 'Winter');
-
--- Create the Anime table using these enums
-CREATE TABLE anime (
-    id SERIAL PRIMARY KEY,
-    title TEXT NOT NULL,
-    type anime_type NOT NULL,
-    episodes INTEGER DEFAULT NULL,
-    status status NOT NULL,
-    season season DEFAULT NULL,
-    year INTEGER DEFAULT NULL,
-    duration INTEGER DEFAULT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    version INTEGER NOT NULL DEFAULT 0
-);
-
--- Create the Tag table
-CREATE TABLE tag (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- Link the tags to each anime in both tables
-CREATE TABLE anime_tags (
-    anime_id INTEGER REFERENCES anime(id) ON DELETE CASCADE,
-    tag_id INTEGER REFERENCES tag(id) ON DELETE CASCADE,
-    PRIMARY KEY (anime_id, tag_id)
-);
-```
-
-Alright, let’s move on to the ‘down’ migration and add the SQL statements needed to reverse the ‘up’ migration that we just wrote.
-```sql
--- Drop the anime_tag table first (if it exists)
-DROP TABLE IF EXISTS anime_tag;
-
--- Drop the anime, tag tables
-DROP TABLE IF EXISTS tag;
-DROP TABLE IF EXISTS anime;
-
--- Drop the enums in reverse order of creation
-DROP TYPE IF EXISTS season;
-DROP TYPE IF EXISTS status;
-DROP TYPE IF EXISTS anime_type;
-```
-
-// mine isn't using below cause different implementation
-While we are at it, let’s also create a second pair of migration files containing CHECK constraints to enforce some of our business rules at the database-level. 
-Specifically, we want to make sure that the runtime value is always greater than zero, the year value is between 1888 and the current year, and the genres array always contains between 1 and 5 items.
-```shell
-$ migrate create -seq -ext=.sql -dir=./migrations add_movies_check_constraints
-```
-And then add the following SQL statements to add and drop the CHECK constraints respectively:
-```sql
-ALTER TABLE movies ADD CONSTRAINT movies_runtime_check CHECK (runtime >= 0);
-
-ALTER TABLE movies ADD CONSTRAINT movies_year_check CHECK (year BETWEEN 1888 AND date_part('year', now()));
-
-ALTER TABLE movies ADD CONSTRAINT genres_length_check CHECK (array_length(genres, 1) BETWEEN 1 AND 5);
-```
-```sql
-ALTER TABLE movies DROP CONSTRAINT IF EXISTS movies_runtime_check;
-
-ALTER TABLE movies DROP CONSTRAINT IF EXISTS movies_year_check;
-
-ALTER TABLE movies DROP CONSTRAINT IF EXISTS genres_length_check;
-```
-
-When we insert or update data in our movies table, if any of these checks fail our database driver will return an error similar to this:
-
-```shell
-pq: new row for relation "movies" violates check constraint "movies_year_check"
-```
-
-## Executing Migrations
-```shell
-migrate -path=./migrations -database=$PURPLELIGHT_DB_DSN up
-```
-
-// mine just this
-```shell
-PS C:\Users\manzi\GolandProjects\purplelight> migrate -path migrations -database postgres://purplelight:Neige@localhost/purplelight?sslmode=disable up
-1/u create_anime_table (62.1426ms)
-```
-
-At this point, it’s worth opening a connection to your database and listing the tables with the \dt meta command:
-```shell
-purplelight=> \dt
-                List of relations                                                                                  
- Schema |       Name        | Type  |    Owner
---------+-------------------+-------+-------------
- public | anime             | table | purplelight
- public | anime_tags        | table | purplelight
- public | schema_migrations | table | purplelight
- public | tag               | table | purplelight                                                                  
-(4 rows) 
-```
-The schema_migrations table is automatically generated by the migrate tool and used to keep track of which migrations have been applied.
-
-The version column here indicates that our migration files up to (and including) number 2 in the sequence have been executed against the database. The value of the dirty column is false, which indicates that the migration files were cleanly executed without any errors and the SQL statements they contain were successfully applied in full.
-
-### Migrate to specific version
-```shell
-migrate -path=./migrations -database=$EXAMPLE_DSN goto 1
-```
-
-### Down Migrations
-You can use the down command to roll-back by a specific number of migrations. For example, to rollback the most recent migration you would run:
-```shell
-migrate -path=./migrations -database =$EXAMPLE_DSN down 1
-```
-
-### Migration Errors
-When you run a migration that contains an error, all SQL statements up to the erroneous one will be applied and then the migrate tool will exit with a message describing the error.
-```shell
-$ migrate -path=./migrations -database=$EXAMPLE_DSN up
-1/u create_foo_table (36.6328ms)
-2/u create_bar_table (71.835442ms)
-error: migration failed: syntax error at end of input in line 0: CREATE TABLE (details: pq: syntax error at end of input)
-```
-
-In turn, this means that the database is in an unknown state as far as the migrate tool is concerned.
-
-Accordingly, the version field in the schema_migrations field will contain the number for the failed migration and the dirty field will be set to true. At this point, if you run another migration (even a ‘down’ migration) you will get an error message similar to this:
-```shell
-Dirty database version {X}. Fix and force version.
-```
-
-What you need to do is investigate the original error and figure out if the migration file which failed was partially applied. If it was, then you need to manually roll-back the partially applied migration.
-
-Once that’s done, then you must also ‘force’ the version number in the schema_migrations table to the correct value. For example, to force the database version number to 1 you should use the force command like so:
-```shell
-migrate -path=./migrations -database=$EXAMPLE_DSN force 1
-```
-
-### Remote migrations
-The migrate tool also supports reading migration files from remote sources including Amazon S3 and GitHub repositories.
-```shell
-$ migrate -source="s3://<bucket>/<path>" -database=$EXAMPLE_DSN up
-$ migrate -source="github://owner/repo/path#ref" -database=$EXAMPLE_DSN up
-$ migrate -source="github://user:personal-access-token@owner/repo/path#ref" -database=$EXAMPLE_DSN up
-```
-
-### Running migrations on application startup
-It is also possible to use the golang-migrate/migrate Go package (not the command-line tool) to automatically execute your database migrations on application start up.
+## Setting up the Movie Model
+To the internal/data/movies.go file and create a MovieModel struct type and some placeholder methods for performing basic CRUD (create, read, update and delete).
 ```go
-package main
+package data
 
 import (
-    "context"      
-    "database/sql" 
-    "flag"
-    "fmt"
-    "log"
-    "net/http"
-    "os"
+    "database/sql" // New import
     "time"
 
-    "github.com/golang-migrate/migrate/v4"                   // New import
-    "github.com/golang-migrate/migrate/v4/database/postgres" // New import
-    _ "github.com/golang-migrate/migrate/v4/source/file"     // New import
-    _ "github.com/lib/pq"
+    "greenlight.alexedwards.net/internal/validator"
 )
 
-func main() {
+...
+
+// Define a MovieModel struct type which wraps a sql.DB connection pool.
+type MovieModel struct {
+    DB *sql.DB
+}
+
+// Add a placeholder method for inserting a new record in the movies table.
+func (m MovieModel) Insert(movie *Movie) error {
+    return nil
+}
+
+// Add a placeholder method for fetching a specific record from the movies table.
+func (m MovieModel) GetAnime(id int64) (*Movie, error) {
+    return nil, nil
+}
+
+// Add a placeholder method for updating a specific record in the movies table.
+func (m MovieModel) UpdateAnime(movie *Movie) error {
+    return nil
+}
+
+// Add a placeholder method for deleting a specific record from the movies table.
+func (m MovieModel) Delete(id int64) error {
+    return nil
+}
+```
+
+// I'll put it in a separate package, repository  
+// well damn, mine gonna differs quite a lot here, so Imma just skim over it  
+// just covering the theory or new things
+
+## Creating a New Movie
+Insert() method
+```sql
+INSERT INTO movies (title, year, runtime, genres) 
+VALUES ($1, $2, $3, $4)
+RETURNING id, created_at, version
+```
+
+There are few things about this query which warrant a bit of explanation.
+
+- It uses $N notation to represent placeholder parameters for the data that we want to insert in the movies table. As we explained in Let’s Go, every time that you pass untrusted input data from a client to a SQL database it’s important to use placeholder parameters to help prevent SQL injection attacks, unless you have a very specific reason for not using them.
+
+- We’re only inserting values for title, year, runtime and genres. The remaining columns in the movies table will be filled with system-generated values at the moment of insertion — the id will be an auto-incrementing integer, and the created_at and version values will default to the current time and 1 respectively.
+
+- At the end of the query we have a RETURNING clause. This is a PostgreSQL-specific clause (it’s not part of the SQL standard) that you can use to return values from any record that is being manipulated by an INSERT, UPDATE or DELETE statement. In this query we’re using it to return the system-generated id, created_at and version values.
+
+### Executing the SQL query
+Normally, you would use Go’s Exec() method to execute an INSERT statement against a database table. But because our SQL query is returning a single row of data (thanks to the RETURNING clause), we’ll need to use the QueryRow() method here instead.
+
+```go
+// The Insert() method accepts a pointer to a movie struct, which should contain the 
+// data for the new record.
+func (m MovieModel) Insert(movie *Movie) error {
+    // Define the SQL query for inserting a new record in the movies table and returning
+    // the system-generated data.
+    query := `
+        INSERT INTO movies (title, year, runtime, genres) 
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, created_at, version`
+
+    // Create an args slice containing the values for the placeholder parameters from 
+    // the movie struct. Declaring this slice immediately next to our SQL query helps to
+    // make it nice and clear *what values are being used where* in the query.
+    args := []any{movie.Title, movie.Year, movie.Runtime, pq.Array(movie.Genres)}
+
+	// Storing the inputs in a slice isn’t strictly necessary, 
+	// but as mentioned in the code comments above it’s a nice pattern that can help the clarity of your code.
+	
+	
+    // Use the QueryRow() method to execute the SQL query on our connection pool,
+    // passing in the args slice as a variadic parameter and scanning the system-
+    // generated id, created_at and version values into the movie struct.
+    return m.DB.QueryRow(query, args...).Scan(&movie.ID, &movie.CreatedAt, &movie.Version)
+}
+```
+
+Because the Insert() method signature takes a `*Movie` pointer as the parameter, when we call `Scan()` to read in the system-generated data we’re updating the values at the location the parameter points to. Essentially, our `Insert()` method mutates the Movie struct that we pass to it and adds the system-generated values to it.
+
+In order to store our movie.Genres value (which is a []string slice) in the database, we need to pass it through the pq.Array() adapter function before executing the SQL query.
+
+Behind the scenes, the pq.Array() adapter takes our []string slice and converts it to a pq.StringArray type. In turn, the pq.StringArray type implements the driver.Valuer and sql.Scanner interfaces necessary to translate our native []string slice to and from a value that our PostgreSQL database can understand and store in a text[] array column.
+
+// I dont use array, I used many-to-many relationship to store tags
+
+### Hooking it up to API handler
+```go
+func (app *application) createMovieHandler(w http.ResponseWriter, r *http.Request) {
+    var input struct {
+        Title   string       `json:"title"`
+        Year    int32        `json:"year"`
+        Runtime data.Runtime `json:"runtime"`
+        Genres  []string     `json:"genres"`
+    }
+
+    err := app.readJSON(w, r, &input)
+    if err != nil {
+        app.badRequestResponse(w, r, err)
+        return
+    }
+
+    // Note that the movie variable contains a *pointer* to a Movie struct.
+    movie := &data.Movie{
+        Title:   input.Title,
+        Year:    input.Year,
+        Runtime: input.Runtime,
+        Genres:  input.Genres,
+    }
+
+    v := validator.New()
+
+    if data.ValidateMovie(v, movie); !v.Valid() {
+        app.failedValidationResponse(w, r, v.Errors)
+        return
+    }
+
+    // Call the Insert() method on our movies model, passing in a pointer to the 
+    // validated movie struct. This will create a record in the database and update the 
+    // movie struct with the system-generated information.
+    err = app.models.Movies.Insert(movie)
+    if err != nil {
+        app.serverErrorResponse(w, r, err)
+        return
+    }
+
+    // When sending a HTTP response, we want to include a Location header to let the 
+    // client know which URL they can find the newly-created resource at. We make an  
+    // empty http.Header map and then use the Set() method to add a new Location header,
+    // interpolating the system-generated ID for our new movie in the URL.
+    headers := make(http.Header)
+    headers.Set("Location", fmt.Sprintf("/v1/movies/%d", movie.ID))
+
+    // Write a JSON response with a 201 Created status code, the movie data in the 
+    // response body, and the Location header.
+    err = app.writeJSON(w, http.StatusCreated, envelope{"movie": movie}, headers)
+    if err != nil {
+        app.serverErrorResponse(w, r, err)
+    }
+}
+```
+
+The response also includes the Location: /v1/movies/1 header, pointing to the URL which will later represent the movie in our system.
+
+#### $N notation
+A nice feature of the PostgreSQL placeholder parameter $N notation is that you can use the same parameter value in multiple places in your SQL statement. For example, it’s perfectly acceptable to write code like this:
+
+```go
+// This SQL statement uses the $1 parameter twice, and the value `123` will be used in 
+// both locations where $1 appears.
+stmt := "UPDATE foo SET bar = $1 + $2 WHERE bar = $1"
+err := db.Exec(stmt, 123, 456)
+if err != nil {
     ...
+}
+```
 
-    db, err := openDB(cfg)
+#### Executing multiple statements
+Occasionally you might find yourself in the position where you want to execute more than one SQL statement in the same database call, like this:
+```go
+stmt := `
+    UPDATE foo SET bar = true; 
+    UPDATE foo SET baz = false;`
+
+err := db.Exec(stmt)
+if err != nil {
+    ...
+}
+```
+
+Having multiple statements in the same call is supported by the pq driver, so long as the statements do not contain any `placeholder parameters`. If they do contain placeholder parameters, then you’ll receive the following error message at runtime:
+```shell
+pq: cannot insert multiple commands into a prepared statement
+```
+
+To work around this, you will need to either split out the statements into separate database calls, or if that’s not possible, you can create a custom function in PostgreSQL which acts as a wrapper around the multiple SQL statements that you want to run.
+
+## Fetching a Movie
+Get() method
+```sql
+SELECT id, created_at, title, year, runtime, genres, version
+FROM movies
+WHERE id = $1
+```
+
+Because our movies table uses the id column as its primary key, this query will only ever return exactly one database row (or none at all).
+```go
+func (m MovieModel) Get(id int64) (*Movie, error) {
+    // The PostgreSQL bigserial type that we're using for the movie ID starts
+    // auto-incrementing at 1 by default, so we know that no movies will have ID values
+    // less than that. To avoid making an unnecessary database call, we take a shortcut
+    // and return an ErrRecordNotFound error straight away.
+    if id < 1 {
+        return nil, ErrRecordNotFound
+    }
+
+    // Define the SQL query for retrieving the movie data.
+    query := `
+        SELECT id, created_at, title, year, runtime, genres, version
+        FROM movies
+        WHERE id = $1`
+
+    // Declare a Movie struct to hold the data returned by the query.
+    var movie Movie
+
+    // Execute the query using the QueryRow() method, passing in the provided id value  
+    // as a placeholder parameter, and scan the response data into the fields of the 
+    // Movie struct. Importantly, notice that we need to convert the scan target for the 
+    // genres column using the pq.Array() adapter function again.
+    err := m.DB.QueryRow(query, id).Scan(
+        &movie.ID,
+        &movie.CreatedAt,
+        &movie.Title,
+        &movie.Year,
+        &movie.Runtime,
+        pq.Array(&movie.Genres),
+        &movie.Version,
+    )
+
+    // Handle any errors. If there was no matching movie found, Scan() will return 
+    // a sql.ErrNoRows error. We check for this and return our custom ErrRecordNotFound 
+    // error instead. 
     if err != nil {
-        logger.Error(err.Error())
-        os.Exit(1)
+        switch {
+        case errors.Is(err, sql.ErrNoRows):
+            return nil, ErrRecordNotFound
+        default:
+            return nil, err
+        }
     }
-    defer db.Close()
 
-    logger.Info("database connection pool established")
+    // Otherwise, return a pointer to the Movie struct.
+    return &movie, nil
+}
+```
 
-    migrationDriver, err := postgres.WithInstance(db, &postgres.Config{})
+### Updating the API handler
+```go
+func (app *application) showMovieHandler(w http.ResponseWriter, r *http.Request) {
+    id, err := app.readIDParam(r)
     if err != nil {
-        logger.Error(err.Error())
-        os.Exit(1)
+        app.notFoundResponse(w, r)
+        return
     }
 
-    migrator, err := migrate.NewWithDatabaseInstance("file:///path/to/your/migrations", "postgres", migrationDriver)
+    // Call the Get() method to fetch the data for a specific movie. We also need to 
+    // use the errors.Is() function to check if it returns a data.ErrRecordNotFound
+    // error, in which case we send a 404 Not Found response to the client.
+    movie, err := app.models.Movies.Get(id)
     if err != nil {
-        logger.Error(err.Error())
-        os.Exit(1)
+        switch {
+        case errors.Is(err, data.ErrRecordNotFound):
+            app.notFoundResponse(w, r)
+        default:
+            app.serverErrorResponse(w, r, err)
+        }
+        return
     }
 
-    err = migrator.Up()
-    if err != nil && err != migrate.ErrNoChange {
-        logger.Error(err.Error())
-        os.Exit(1)
+    err = app.writeJSON(w, http.StatusOK, envelope{"movie": movie}, nil)
+    if err != nil {
+        app.serverErrorResponse(w, r, err)
     }
-    
-    logger.Info("database migrations applied")
+}
+```
+
+#### Why not use an unsigned integer for the movie ID?
+At the start of the Get() method we have the following code which checks if the movie id parameter is less than 1:
+```go
+func (m MovieModel) Get(id int64) (*Movie, error) {
+    if id < 1 {
+        return nil, ErrRecordNotFound
+    }
 
     ...
 }
 
-Although this works — and it might initially seem appealing — tightly coupling the execution of migrations with your application source code can potentially be limiting and problematic in the longer term.
+This might have led you to wonder: if the movie ID is never negative, why aren’t we using an unsigned uint64 type to store the ID in our Go code, instead of an int64?
+
+There are two reasons for this.
+
+The first reason is because PostgreSQL doesn’t have unsigned integers. It’s generally sensible to align your Go and database integer types to avoid overflows or other compatibility problems, so because PostgreSQL doesn’t have unsigned integers, this means that we should avoid using uint* types in our Go code for any values that we’re reading/writing to PostgreSQL too.
+
+Instead, it’s best to align the integer types based on the following table:
+
+
+| PostgreSQL type | Go type                          |
+| --------------- | -------------------------------- |
+| smallint, smallserial | int16 (-32768 to 32767)         |
+| integer, serial       | int32 (-2147483648 to 2147483647) |
+| bigint, bigserial     | int64 (-9223372036854775808 to 9223372036854775807) |
+
+
+## Updating a Movie
+
+### Executing the SQL query
+```sql
+UPDATE movies
+SET title = $1, year = $2, runtime = $3, genres = $4, version = version + 1
+WHERE id = $5
+RETURNING version
+```
+
+```go
+func (m MovieModel) Update(movie *Movie) error {
+    // Declare the SQL query for updating the record and returning the new version
+    // number.
+    query := `
+        UPDATE movies 
+        SET title = $1, year = $2, runtime = $3, genres = $4, version = version + 1
+        WHERE id = $5
+        RETURNING version`
+
+    // Create an args slice containing the values for the placeholder parameters.
+    args := []any{
+        movie.Title,
+        movie.Year,
+        movie.Runtime,
+        pq.Array(movie.Genres),
+        movie.ID,
+    }
+
+    // Use the QueryRow() method to execute the query, passing in the args slice as a
+    // variadic parameter and scanning the new version value into the movie struct.
+    return m.DB.QueryRow(query, args...).Scan(&movie.Version)
+}
+```
+
+### Creating the API handler
+Specifically, we’ll need to:
+
+- Extract the movie ID from the URL using the app.readIDParam() helper.
+- Fetch the corresponding movie record from the database using the Get() method that we made in the previous chapter.
+- Read the JSON request body containing the updated movie data into an input struct.
+- Copy the data across from the input struct to the movie record.
+- Check that the updated movie record is valid using the data.ValidateMovie() function.
+- Call the Update() method to store the updated movie record in our database.
+- Write the updated movie data in a JSON response using the app.writeJSON() helper.
+
+```go
+func (app *application) updateMovieHandler(w http.ResponseWriter, r *http.Request) {
+    // Extract the movie ID from the URL.
+    id, err := app.readIDParam(r)
+    if err != nil {
+        app.notFoundResponse(w, r)
+        return
+    }
+
+    // Fetch the existing movie record from the database, sending a 404 Not Found 
+    // response to the client if we couldn't find a matching record.
+    movie, err := app.models.Movies.Get(id)
+    if err != nil {
+        switch {
+        case errors.Is(err, data.ErrRecordNotFound):
+            app.notFoundResponse(w, r)
+        default:
+            app.serverErrorResponse(w, r, err)
+        }
+        return
+    }
+
+    // Declare an input struct to hold the expected data from the client.
+    var input struct {
+        Title   string       `json:"title"`
+        Year    int32        `json:"year"`
+        Runtime data.Runtime `json:"runtime"`
+        Genres  []string     `json:"genres"`
+    }
+
+    // Read the JSON request body data into the input struct.
+    err = app.readJSON(w, r, &input)
+    if err != nil {
+        app.badRequestResponse(w, r, err)
+        return
+    }
+
+    // Copy the values from the request body to the appropriate fields of the movie
+    // record.
+    movie.Title = input.Title
+    movie.Year = input.Year
+    movie.Runtime = input.Runtime
+    movie.Genres = input.Genres
+
+    // Validate the updated movie record, sending the client a 422 Unprocessable Entity
+    // response if any checks fail.
+    v := validator.New()
+
+    if data.ValidateMovie(v, movie); !v.Valid() {
+        app.failedValidationResponse(w, r, v.Errors)
+        return
+    }
+
+    // Pass the updated movie record to our new Update() method.
+    err = app.models.Movies.Update(movie)
+    if err != nil {
+        app.serverErrorResponse(w, r, err)
+        return
+    }
+
+    // Write the updated movie record in a JSON response.
+    err = app.writeJSON(w, http.StatusOK, envelope{"movie": movie}, nil)
+    if err != nil {
+        app.serverErrorResponse(w, r, err)
+    }
+}
+```
+
+Update routes
+```go
+func (app *application) routes() http.Handler {
+    router := httprouter.New()
+
+    router.NotFound = http.HandlerFunc(app.notFoundResponse)
+    router.MethodNotAllowed = http.HandlerFunc(app.methodNotAllowedResponse)
+
+    router.HandlerFunc(http.MethodGet, "/v1/healthcheck", app.healthcheckHandler)
+    router.HandlerFunc(http.MethodPost, "/v1/movies", app.createMovieHandler)
+    router.HandlerFunc(http.MethodGet, "/v1/movies/:id", app.showMovieHandler)
+    // Add the route for the PUT /v1/movies/:id endpoint.
+    router.HandlerFunc(http.MethodPut, "/v1/movies/:id", app.updateMovieHandler)
+
+    return app.recoverPanic(router)
+}
+```
+
+Example
+```shell
+$ BODY='{"title":"Black Panther","year":2018,"runtime":"134 mins","genres":["sci-fi","action","adventure"]}'
+$ curl -X PUT -d "$BODY" localhost:4000/v1/movies/2
+{
+    "movie": {
+        "id": 2,
+        "title": "Black Panther",
+        "year": 2018,
+        "runtime": "134 mins",
+        "genres": [
+            "sci-fi",
+            "action",
+            "adventure"
+        ],
+        "version": 2
+    }
+}
+```
+
+## Deleting a Movie
+`DELETE	/v1/movies/:id	deleteMovieHandler	Delete a specific movie`
+
+- If a movie with the id provided in the URL exists in the database, we want to delete the corresponding record and return a success message to the client.
+- If the movie id doesn’t exist, we want to return a 404 Not Found response to the client.
+
+SQL query
+```sql
+DELETE FROM movies
+WHERE id = $1
+```
+
+In this case the SQL query returns no rows, so it’s appropriate for us to use Go’s Exec().
+
+
+Adding the new endpoint
+```go
+func (m MovieModel) Delete(id int64) error {
+    // Return an ErrRecordNotFound error if the movie ID is less than 1.
+    if id < 1 {
+        return ErrRecordNotFound
+    }
+
+    // Construct the SQL query to delete the record.
+    query := `
+        DELETE FROM movies
+        WHERE id = $1`
+
+    // Execute the SQL query using the Exec() method, passing in the id variable as
+    // the value for the placeholder parameter. The Exec() method returns a sql.Result
+    // object.
+    result, err := m.DB.Exec(query, id)
+    if err != nil {
+        return err
+    }
+
+    // Call the RowsAffected() method on the sql.Result object to get the number of rows
+    // affected by the query.
+    rowsAffected, err := result.RowsAffected()
+    if err != nil {
+        return err
+    }
+
+    // If no rows were affected, we know that the movies table didn't contain a record
+    // with the provided ID at the moment we tried to delete it. In that case we 
+    // return an ErrRecordNotFound error.
+    if rowsAffected == 0 {
+        return ErrRecordNotFound
+    }
+
+    return nil
+}
+```
+
+```go
+func (app *application) deleteMovieHandler(w http.ResponseWriter, r *http.Request) {
+    // Extract the movie ID from the URL.
+    id, err := app.readIDParam(r)
+    if err != nil {
+        app.notFoundResponse(w, r)
+        return
+    }
+
+    // Delete the movie from the database, sending a 404 Not Found response to the
+    // client if there isn't a matching record.
+    err = app.models.Movies.Delete(id)
+    if err != nil {
+        switch {
+        case errors.Is(err, data.ErrRecordNotFound):
+            app.notFoundResponse(w, r)
+        default:
+            app.serverErrorResponse(w, r, err)
+        }
+        return
+    }
+
+    // Return a 200 OK status code along with a success message.
+    err = app.writeJSON(w, http.StatusOK, envelope{"message": "movie successfully deleted"}, nil)
+    if err != nil {
+        app.serverErrorResponse(w, r, err)
+    }
+}
+```
+

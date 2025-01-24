@@ -1,11 +1,11 @@
--- Drop the anime_tag table first (if it exists)
-DROP TABLE IF EXISTS anime_tag;
+-- Drop the anime_tags table first, since it depends on the anime table
+DROP TABLE IF EXISTS anime_tags;
 
--- Drop the anime, tag tables
-DROP TABLE IF EXISTS tag;
+-- Now you can safely drop the anime, tag tables, and the enums
 DROP TABLE IF EXISTS anime;
+DROP TABLE IF EXISTS tag;
 
--- Drop the enums in reverse order of creation
+-- Finally, drop the custom types (enums)
 DROP TYPE IF EXISTS season;
 DROP TYPE IF EXISTS status;
 DROP TYPE IF EXISTS anime_type;
