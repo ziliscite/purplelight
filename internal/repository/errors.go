@@ -8,6 +8,7 @@ import (
 )
 
 var (
+	ErrEditConflict         = errors.New("edit conflict")
 	ErrTooManyRows          = errors.New("too many rows returned")
 	ErrRecordNotFound       = errors.New("record not found")
 	ErrDuplicateEntry       = errors.New("duplicate entry")
@@ -40,6 +41,8 @@ func (l *dbLogger) handleError(err error) error {
 		// Return corresponding error code
 		switch pgErr.Code {
 		case "23505": // Unique constraint violation
+			return ErrDuplicateEntry
+		case "42P05":
 			return ErrDuplicateEntry
 		case "23503": // Foreign key violation
 			return ErrForeignKeyViolation

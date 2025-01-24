@@ -50,7 +50,7 @@ func (a AnimeRepository) InsertAnime(anime *data.Anime) error {
 	}()
 
 	// Insert anime through the main transaction
-	animeStmt, err := tx.Prepare(ctx, "anime", `
+	animeStmt, err := tx.Prepare(ctx, "insert anime", `
 		INSERT INTO anime (title, type, episodes, status, season, year, duration)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, created_at, version
@@ -108,7 +108,7 @@ func (a AnimeRepository) GetAnime(id int32) (*data.Anime, error) {
 		}
 	}()
 
-	animeStmt, err := tx.Prepare(ctx, "anime", `
+	animeStmt, err := tx.Prepare(ctx, "get anime", `
 		SELECT * FROM anime WHERE id = $1
 	`)
 	if err != nil {
@@ -162,12 +162,13 @@ func (a AnimeRepository) UpdateAnime(anime *data.Anime) error {
 		}
 	}()
 
-	animeStmt, err := tx.Prepare(ctx, "anime", `
+	// Add the 'AND version = $6' clause to the SQL query
+	animeStmt, err := tx.Prepare(ctx, "update anime", `
 		UPDATE anime 
 		SET title = $1, type = $2, episodes = $3, 
 		    status = $4, season = $5, year = $6, 
 		    duration = $7, version = version + 1
-		WHERE id = $8
+		WHERE id = $8 AND version = $9
 		RETURNING version
 	`)
 	if err != nil {
@@ -176,10 +177,16 @@ func (a AnimeRepository) UpdateAnime(anime *data.Anime) error {
 	}
 
 	// Update anime record
-	err = tx.QueryRow(ctx, animeStmt.SQL, anime.Title, anime.Type, anime.Episodes, anime.Status, anime.Season, anime.Year, anime.Duration).
+	// Execute the SQL query. If no matching row could be found, we know the movie
+	// version has changed (or the record has been deleted) and we return our custom
+	// ErrEditConflict error.
+	err = tx.QueryRow(ctx,
+		animeStmt.SQL, anime.Title, anime.Type, anime.Episodes, anime.Status,
+		anime.Season, anime.Year, anime.Duration, anime.ID, anime.Version,
+	).
 		Scan(&anime.Version)
 	if err != nil {
-		return a.logger.handleError(err)
+		return a.logger.handleError(fmt.Errorf("%w: %s", ErrEditConflict, err.Error()))
 	}
 
 	// Delete current anime tags
