@@ -76,7 +76,7 @@ func (l *dbLogger) handleError(err error) error {
 
 	// check for database generic errors
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(err, sql.ErrNoRows) || errors.Is(err, ErrRecordNotFound):
 		return ErrRecordNotFound
 	case errors.Is(err, pgx.ErrTxClosed):
 		return ErrTransaction

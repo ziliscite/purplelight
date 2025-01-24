@@ -11,15 +11,21 @@ import (
 func (app *application) createAnime(w http.ResponseWriter, r *http.Request) {
 	var request animeRequest
 
-	err := app.read(w, r, &request)
+	err := app.readBody(w, r, &request)
 	if err != nil {
 		app.badRequest(w, r, err)
 		return
 	}
 
-	anime := request.toPost()
-
 	v := validator.New()
+
+	// double validation, kinda bad tbh
+	anime := request.toPost(v)
+	if anime == nil {
+		app.failedValidation(w, r, v.Errors)
+		return
+	}
+
 	if data.ValidateAnime(v, anime); !v.Valid() {
 		app.failedValidation(w, r, v.Errors)
 		return
@@ -41,6 +47,45 @@ func (app *application) createAnime(w http.ResponseWriter, r *http.Request) {
 	// Write a JSON response with a 201 Created status code, the movie data in the
 	// response body, and the Location header.
 	err = app.write(w, http.StatusCreated, envelope{"anime": anime}, headers)
+	if err != nil {
+		app.serverError(w, r, err)
+	}
+}
+
+func (app *application) listAnime(w http.ResponseWriter, r *http.Request) {
+	// To keep things consistent with our other handlers, we'll define an input struct
+	// to hold the expected values from the request query string.
+	var input animeQuery
+
+	// Initialize a new Validator instance.
+	v := validator.New()
+
+	// Call r.URL.Query() to get the url.Values map containing the query string data.
+	qs := r.URL.Query()
+
+	// Use the readQuery() method to extract the title, genres, page, page_size, and sort
+	// query string values, falling back to default values if they are not provided by the
+	// client. Pass the query string map, the application struct, the Validator instance,
+	// and the input struct as arguments.
+	input.readQuery(qs, app, v)
+
+	// Execute the validation checks on the Filters struct and send a response
+	// containing the errors if necessary.
+	// Check the Validator instance for any errors and use the failedValidationResponse()
+	// helper to send the client a response if necessary.
+	if data.ValidateFilters(v, input.Filters); !v.Valid() {
+		app.failedValidation(w, r, v.Errors)
+		return
+	}
+
+	// Call the GetAll() method on the movies repository to get a slice of Movie structs
+	anime, err := app.repos.Anime.GetAll(input.Title, input.Status, input.Season, input.AnimeType, input.Tags, input.Filters)
+	if err != nil {
+		app.dbReadError(w, r, err)
+		return
+	}
+
+	err = app.write(w, http.StatusOK, envelope{"anime": anime}, nil)
 	if err != nil {
 		app.serverError(w, r, err)
 	}
@@ -88,19 +133,15 @@ func (app *application) updateAnime(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var request animeRequest
-	err = app.read(w, r, &request)
-	if err != nil {
-		app.badRequest(w, r, err)
-		return
-	}
-
-	err = request.toPut(anime)
+	err = app.readBody(w, r, &request)
 	if err != nil {
 		app.badRequest(w, r, err)
 		return
 	}
 
 	v := validator.New()
+	request.toPut(anime, v)
+
 	if data.ValidateAnime(v, anime); !v.Valid() {
 		app.failedValidation(w, r, v.Errors)
 		return
@@ -162,7 +203,7 @@ func (app *application) partiallyUpdateAnime(w http.ResponseWriter, r *http.Requ
 	}
 
 	var request animeRequest
-	err = app.read(w, r, &request)
+	err = app.readBody(w, r, &request)
 	if err != nil {
 		app.badRequest(w, r, err)
 		return

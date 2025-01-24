@@ -1,8 +1,9 @@
 package main
 
 import (
-	"errors"
 	"github.com/ziliscite/purplelight/internal/data"
+	"github.com/ziliscite/purplelight/internal/validator"
+	"net/url"
 )
 
 type animeRequest struct {
@@ -16,25 +17,25 @@ type animeRequest struct {
 	Tags     []string        `json:"tags,omitempty"`
 }
 
-func (a animeRequest) nilCheck() error {
+func (a animeRequest) nilCheck(v *validator.Validator) bool {
 	if a.Title == nil {
-		return errors.New("title is required")
+		v.AddError("title", "title should not be nil")
 	}
 
 	if a.Type == nil {
-		return errors.New("type is required")
+		v.AddError("type", "type should not be nil")
 	}
 
 	if a.Status == nil {
-		return errors.New("status is required")
+		v.AddError("status", "status should not be nil")
 	}
 
-	return nil
+	return v.Valid()
 }
 
-func (a animeRequest) toPost() *data.Anime {
-	err := a.nilCheck()
-	if err != nil {
+func (a animeRequest) toPost(v *validator.Validator) *data.Anime {
+	ok := a.nilCheck(v)
+	if !ok {
 		return nil
 	}
 
@@ -50,10 +51,10 @@ func (a animeRequest) toPost() *data.Anime {
 	}
 }
 
-func (a animeRequest) toPut(anime *data.Anime) error {
-	err := a.nilCheck()
-	if err != nil {
-		return err
+func (a animeRequest) toPut(anime *data.Anime, v *validator.Validator) {
+	ok := a.nilCheck(v)
+	if !ok {
+		return
 	}
 
 	anime.Title = *a.Title
@@ -64,8 +65,6 @@ func (a animeRequest) toPut(anime *data.Anime) error {
 	anime.Year = a.Year
 	anime.Duration = a.Duration
 	anime.Tags = a.Tags
-
-	return nil
 }
 
 func (a animeRequest) toPatch(anime *data.Anime) {
@@ -107,4 +106,45 @@ func (a animeRequest) toPatch(anime *data.Anime) {
 	if a.Tags != nil {
 		anime.Tags = a.Tags
 	}
+}
+
+type animeQuery struct {
+	Title     string
+	Status    string
+	Season    string
+	AnimeType string
+	Tags      []string
+	data.Filters
+}
+
+func (aq *animeQuery) readQuery(qs url.Values, app *application, v *validator.Validator) {
+	// Use our helpers to extract the title and genres query string values, falling back
+	// to defaults of an empty string and an empty slice respectively if they are not
+	// provided by the client.
+	aq.Title = app.readString(qs, "title", "")
+	aq.Tags = app.readCSV(qs, "tags", []string{})
+
+	// Extract the status, season, and type query string values, falling back to the
+	// zero value for each type if they are not provided by the client.
+	var status data.Status
+	aq.Status = app.readIota(qs, "status", "", status, v)
+
+	var season data.Season
+	aq.Season = app.readIota(qs, "season", "", season, v)
+
+	var animeType data.AnimeType
+	aq.AnimeType = app.readIota(qs, "anime_type", "", animeType, v)
+
+	// Get the page and page_size query string values as integers. Notice that we set
+	// the default page value to 1 and default page_size to 20, and that we pass the
+	// validator instance as the final argument here.
+	aq.Filters.Page = app.readInt(qs, "page", 1, v)
+	aq.Filters.PageSize = app.readInt(qs, "page_size", 20, v)
+
+	// Extract the sort query string value, falling back to "id" if it is not provided
+	// by the client (which will imply a ascending sort on movie ID).
+	aq.Filters.Sort = app.readString(qs, "sort", "id")
+
+	// Add the supported sort values for this endpoint to the sort safelist.
+	aq.Filters.SortSafeList = []string{"id", "title", "year", "episodes", "-id", "-title", "-year", "-episodes"}
 }
