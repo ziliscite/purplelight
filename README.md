@@ -602,7 +602,385 @@ ORDER BY id
 This approach would be better from a server point of view because it’s possible to create an index on the title field using the pg_trgm extension and a GIN index
 
 ## Sorting Lists
+We want to let the client control the sort order via a query string parameter in the format sort={-}{field_name}, where the optional - character is used to indicate a descending sort order.
+```shell
+// Sort the movies on the title field in ascending alphabetical order.
+/v1/movies?sort=title
 
+// Sort the movies on the year field in descending numerical order.
+/v1/movies?sort=-year
+```
 
+Behind the scenes we will want to translate this into an ORDER BY clause in our SQL query, so that a query string parameter like sort=-year would result in a SQL query like this:
+```sql
+SELECT id, created_at, title, year, runtime, genres, version
+FROM movies
+WHERE (STRPOS(LOWER(title), LOWER($1)) > 0 OR $1 = '')
+AND (genres @> $2 OR $2 = '{}')     
+ORDER BY year DESC -- <-- Order the result by descending year
+```
 
+The difficulty here is that the values for the ORDER BY clause will need to be generated at runtime based on the query string values from the client. 
 
+> Unfortunately it’s not possible to use placeholder parameters for column names or SQL keywords (including ASC and DESC).
+
+So instead, we’ll need to interpolate these dynamic values into our query using fmt.Sprintf() — making sure that the values are checked against a strict safelist first to prevent a SQL injection attack.
+
+In our database multiple movies will have the same year value. If we order based on the year column, then the movies are guaranteed be ordered by year, but the movies for a particular year could appear in any order at any time.
+
+This point is particularly important in the context of an endpoint which provides pagination. We need to make sure that the order of movies is perfectly consistent between requests to prevent items in the list ‘jumping’ between the pages.
+
+Fortunately, guaranteeing the order is simple — we just need to ensure that the ORDER BY clause always includes a primary key column (or another column with a unique constraint on it).
+
+```sql
+SELECT id, created_at, title, year, runtime, genres, version
+FROM movies
+WHERE (STRPOS(LOWER(title), LOWER($1)) > 0 OR $1 = '') 
+AND (genres @> $2 OR $2 = '{}')     
+ORDER BY year DESC, id ASC
+```
+
+### Implementing sorting
+Begin by updating our Filters struct to include some sortColumn() and sortDirection() helpers that transform a query string value (like -year) into values we can use in our SQL query.
+```go
+// Check that the client-provided Sort field matches one of the entries in our safelist
+// and if it does, extract the column name from the Sort field by stripping the leading
+// hyphen character (if one exists).
+func (f Filters) sortColumn() string {
+    for _, safeValue := range f.SortSafelist {
+        if f.Sort == safeValue {
+            return strings.TrimPrefix(f.Sort, "-")
+        }
+    }
+
+    panic("unsafe sort parameter: " + f.Sort)
+}
+
+// Return the sort direction ("ASC" or "DESC") depending on the prefix character of the
+// Sort field.
+func (f Filters) sortDirection() string {
+    if strings.HasPrefix(f.Sort, "-") {
+        return "DESC"
+    }
+
+    return "ASC"
+}
+```
+
+`sortColumn()` function is constructed in such a way that it will panic if the client-provided Sort value doesn’t match one of the entries in our safelist. In theory this shouldn’t happen — the Sort value should have already been checked by calling the ValidateFilters() function — but this is a sensible failsafe to help stop a SQL injection attack occurring.
+
+```go
+func (m MovieModel) GetAll(title string, genres []string, filters Filters) ([]*Movie, error) {
+    // Add an ORDER BY clause and interpolate the sort column and direction. Importantly
+    // notice that we also include a secondary sort on the movie ID to ensure a
+    // consistent ordering.
+    query := fmt.Sprintf(`
+        SELECT id, created_at, title, year, runtime, genres, version
+        FROM movies
+        WHERE (to_tsvector('simple', title) @@ plainto_tsquery('simple', $1) OR $1 = '') 
+        AND (genres @> $2 OR $2 = '{}')     
+        ORDER BY %s %s, id ASC`, filters.sortColumn(), filters.sortDirection())
+
+    // Nothing else below needs to change.
+    ...
+}
+```
+
+## Paginating Lists
+If you have an endpoint which returns a list with hundreds or thousands of records, then for performance or usability reasons you might want to implement some form of pagination on the endpoint — so that it only returns a subset of the records in a single HTTP response.
+```shell
+// Return the 5 records on page 1 (records 1-5 in the dataset)
+/v1/movies?page=1&page_size=5
+
+// Return the next 5 records on page 2 (records 6-10 in the dataset)
+/v1/movies?page=2&page_size=5
+
+// Return the next 5 records on page 3 (records 11-15 in the dataset)
+/v1/movies?page=3&page_size=5
+```
+
+### The LIMIT and OFFSET clauses
+Behind the scenes, the simplest way to support this style of pagination is by adding LIMIT and OFFSET clauses to our SQL query.
+
+The LIMIT clause allows you to set the maximum number of records that a SQL query should return, and OFFSET allows you to ‘skip’ a specific number of rows before starting to return records from the query.
+```shell
+LIMIT = page_size
+OFFSET = (page - 1) * page_size
+```
+
+```shell
+/v1/movies?page_size=5&page=3
+```
+
+We would need to ‘translate’ this into the following SQL query:
+```sql
+SELECT id, created_at, title, year, runtime, genres, version
+FROM movies
+WHERE (to_tsvector('simple', title) @@ plainto_tsquery('simple', $1) OR $1 = '')
+AND (genres @> $2 OR $2 = '{}')     
+ORDER BY %s %s, id ASC
+LIMIT 5 OFFSET 10
+```
+
+```go
+func (m MovieModel) GetAll(title string, genres []string, filters Filters) ([]*Movie, error) {
+    // Update the SQL query to include the LIMIT and OFFSET clauses with placeholder
+    // parameter values.
+    query := fmt.Sprintf(`
+        SELECT id, created_at, title, year, runtime, genres, version
+        FROM movies
+        WHERE (to_tsvector('simple', title) @@ plainto_tsquery('simple', $1) OR $1 = '') 
+        AND (genres @> $2 OR $2 = '{}')     
+        ORDER BY %s %s, id ASC
+        LIMIT $3 OFFSET $4`, filters.sortColumn(), filters.sortDirection())
+
+    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+    defer cancel()
+
+    // As our SQL query now has quite a few placeholder parameters, let's collect the
+    // values for the placeholders in a slice. Notice here how we call the limit() and
+    // offset() methods on the Filters struct to get the appropriate values for the
+    // LIMIT and OFFSET clauses.
+    args := []any{title, pq.Array(genres), filters.limit(), filters.offset()}
+
+    // And then pass the args slice to QueryContext() as a variadic parameter.
+    rows, err := m.DB.QueryContext(ctx, query, args...)
+    if err != nil {
+        return nil, err
+    }
+
+    // Nothing else below needs to change.
+    ...
+}
+```
+
+## Returning Pagination Metadata
+It would be even better if we could include some additional metadata along with the response. Information like the current and last page numbers, and the total number of available records would help to give the client context.
+```shell
+{
+    "metadata": {
+        "current_page": 1,
+        "page_size": 20,
+        "first_page": 1,
+        "last_page": 42,
+        "total_records": 832
+    },
+    "movies": [
+        {
+            "id": 1,
+            "title": "Moana",
+            "year": 2015,
+            "runtime": "107 mins",
+            "genres": [
+                "animation",
+                "adventure"
+            ],
+            "version": 1
+        },
+        ...
+    ]
+}
+```
+
+### Calculating the total records
+The challenging part of doing this is generating the total_records figure. We want this to reflect the total number of available records given the title and genres filters that are applied — not the absolute total of records in the movies table.
+
+A neat way to do this is to adapt our existing SQL query to include a window function which counts the total number of filtered rows, like so:
+```sql
+SELECT count(*) OVER(), id, created_at, title, year, runtime, genres, version
+FROM movies
+WHERE (to_tsvector('simple', title) @@ plainto_tsquery('simple', $1) OR $1 = '')
+AND (genres @> $2 OR $2 = '{}')     
+ORDER BY %s %s, id ASC
+LIMIT $3 OFFSET $4
+```
+
+When PostgreSQL executes this SQL query, the (very simplified) sequence of events runs broadly like this:
+
+- The WHERE clause is used to filter the data in the movies table and get the qualifying rows.
+- The window function count(*) OVER() is applied, which counts all the qualifying rows.
+- The ORDER BY rules are applied and the qualifying rows are sorted.
+- The LIMIT and OFFSET rules are applied and the appropriate sub-set of sorted qualifying rows is returned.
+
+// we cant just use len() the array, this count is pre-limit ._.
+
+### Metadata
+File: internal/data/filters.go
+```go
+// Define a new Metadata struct for holding the pagination metadata.
+type Metadata struct {
+    CurrentPage  int `json:"current_page,omitempty"`
+    PageSize     int `json:"page_size,omitempty"`
+    FirstPage    int `json:"first_page,omitempty"`
+    LastPage     int `json:"last_page,omitempty"`
+    TotalRecords int `json:"total_records,omitempty"`
+}
+
+// The calculateMetadata() function calculates the appropriate pagination metadata 
+// values given the total number of records, current page, and page size values. Note 
+// that when the last page value is calculated we are dividing two int values, and 
+// when dividing integer types in Go the result will also be an integer type, with 
+// the modulus (or remainder) dropped. So, for example, if there were 12 records in total 
+// and a page size of 5, the last page value would be (12+5-1)/5 = 3.2, which is then
+// truncated to 3 by Go. 
+func calculateMetadata(totalRecords, page, pageSize int) Metadata {
+    if totalRecords == 0 {
+        // Note that we return an empty Metadata struct if there are no records.
+        return Metadata{}
+    }
+
+    return Metadata{
+        CurrentPage:  page,
+        PageSize:     pageSize,
+        FirstPage:    1,
+        LastPage:     (totalRecords + pageSize - 1) / pageSize,
+        TotalRecords: totalRecords,
+    }
+}
+```
+
+Update the GetAll()
+```go
+// Update the function signature to return a Metadata struct.
+func (m MovieModel) GetAll(title string, genres []string, filters Filters) ([]*Movie, Metadata, error) {
+    // Update the SQL query to include the window function which counts the total 
+    // (filtered) records.
+    query := fmt.Sprintf(`
+        SELECT count(*) OVER(), id, created_at, title, year, runtime, genres, version
+        FROM movies
+        WHERE (to_tsvector('simple', title) @@ plainto_tsquery('simple', $1) OR $1 = '') 
+        AND (genres @> $2 OR $2 = '{}')     
+        ORDER BY %s %s, id ASC
+        LIMIT $3 OFFSET $4`, filters.sortColumn(), filters.sortDirection())
+
+    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+    defer cancel()
+
+    args := []any{title, pq.Array(genres), filters.limit(), filters.offset()}
+
+    rows, err := m.DB.QueryContext(ctx, query, args...)
+    if err != nil {
+        return nil, Metadata{}, err // Update this to return an empty Metadata struct.
+    }
+
+    defer rows.Close()
+
+    // Declare a totalRecords variable.
+    totalRecords := 0
+    movies := []*Movie{}
+
+    for rows.Next() {
+        var movie Movie
+
+        err := rows.Scan(
+            &totalRecords, // Scan the count from the window function into totalRecords.
+            &movie.ID,
+            &movie.CreatedAt,
+            &movie.Title,
+            &movie.Year,
+            &movie.Runtime,
+            pq.Array(&movie.Genres),
+            &movie.Version,
+        )
+        if err != nil {
+            return nil, Metadata{}, err // Update this to return an empty Metadata struct.
+        }
+
+        movies = append(movies, &movie)
+    }
+
+    if err = rows.Err(); err != nil {
+        return nil, Metadata{}, err // Update this to return an empty Metadata struct.
+    }
+
+    // Generate a Metadata struct, passing in the total record count and pagination
+    // parameters from the client.
+    metadata := calculateMetadata(totalRecords, filters.Page, filters.PageSize)
+
+    // Include the metadata struct when returning.
+    return movies, metadata, nil
+}
+```
+
+Update our listMoviesHandler
+```go
+func (app *application) listMoviesHandler(w http.ResponseWriter, r *http.Request) {
+    var input struct {
+        Title  string
+        Genres []string
+        data.Filters
+    }
+
+    v := validator.New()
+
+    qs := r.URL.Query()
+
+    input.Title = app.readString(qs, "title", "")
+    input.Genres = app.readCSV(qs, "genres", []string{})
+
+    input.Filters.Page = app.readInt(qs, "page", 1, v)
+    input.Filters.PageSize = app.readInt(qs, "page_size", 20, v)
+
+    input.Filters.Sort = app.readString(qs, "sort", "id")
+    input.Filters.SortSafelist = []string{"id", "title", "year", "runtime", "-id", "-title", "-year", "-runtime"}
+
+    if data.ValidateFilters(v, input.Filters); !v.Valid() {
+        app.failedValidationResponse(w, r, v.Errors)
+        return
+    }
+
+    // Accept the metadata struct as a return value.
+    movies, metadata, err := app.models.Movies.GetAll(input.Title, input.Genres, input.Filters)
+    if err != nil {
+        app.serverErrorResponse(w, r, err)
+        return
+    }
+
+    // Include the metadata in the response envelope.
+    err = app.writeJSON(w, http.StatusOK, envelope{"movies": movies, "metadata": metadata}, nil)
+    if err != nil {
+        app.serverErrorResponse(w, r, err)
+    }
+}
+```
+
+Result
+```shell
+$ curl "localhost:4000/v1/movies?genres=adventure"
+{
+    "metadata": {
+        "current_page": 1,
+        "page_size": 20,
+        "first_page": 1,
+        "last_page": 1,
+        "total_records": 2
+    },
+    "movies": [
+        {
+            "id": 1,
+            "title": "Moana",
+            "year": 2015,
+            "runtime": "107 mins",
+            "genres": [
+                "animation",
+                "adventure"
+            ],
+            "version": 1
+        },
+        {
+            "id": 2,
+            "title": "Black Panther",
+            "year": 2018,
+            "runtime": "134 mins",
+            "genres": [
+                "sci-fi",
+                "action",
+                "adventure"
+            ],
+            "version": 2
+        }
+    ]
+}
+```
+
+The client now has a lot of control over what their response contains, with filtering, pagination and sorting all supported.
