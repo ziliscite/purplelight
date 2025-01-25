@@ -4,7 +4,6 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 type Status string
@@ -56,19 +55,4 @@ func (s *Status) UnmarshalJSON(data []byte) error {
 	default:
 		return fmt.Errorf("%w Status: %s", ErrInvalid, s)
 	}
-}
-
-var statusMap = map[string]Status{
-	"ongoing":  Ongoing,
-	"finished": Finished,
-	"upcoming": Upcoming,
-}
-
-func (s Status) ToEnum(val string) (string, error) {
-	key := strings.ToLower(val)
-	if at, ok := statusMap[key]; ok {
-		s.Set(string(at))
-		return s.String(), nil
-	}
-	return "", fmt.Errorf("%w Status: %s", ErrInvalid, val)
 }

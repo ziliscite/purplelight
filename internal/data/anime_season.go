@@ -4,7 +4,6 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 type Season string
@@ -61,20 +60,4 @@ func (s *Season) UnmarshalJSON(data []byte) error {
 	default:
 		return fmt.Errorf("%w Season: %s", ErrInvalid, s)
 	}
-}
-
-var seasonMap = map[string]Season{
-	"spring": Spring,
-	"summer": Summer,
-	"fall":   Fall,
-	"winter": Winter,
-}
-
-func (s Season) ToEnum(val string) (string, error) {
-	key := strings.ToLower(val)
-	if at, ok := seasonMap[key]; ok {
-		s.Set(string(at))
-		return s.String(), nil
-	}
-	return "", fmt.Errorf("%w Season: %s", ErrInvalid, val)
 }

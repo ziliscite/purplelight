@@ -70,6 +70,11 @@ func (app *application) editConflict(w http.ResponseWriter, r *http.Request) {
 	app.error(w, r, http.StatusConflict, message)
 }
 
+func (app *application) rateLimitExceeded(w http.ResponseWriter, r *http.Request) {
+	message := "rate limit exceeded, please wait"
+	app.error(w, r, http.StatusTooManyRequests, message)
+}
+
 func (app *application) dbWriteError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, repository.ErrDuplicateEntry):
