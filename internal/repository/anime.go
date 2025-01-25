@@ -2,8 +2,6 @@ package repository
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,7 +30,7 @@ func (a AnimeRepository) InsertAnime(anime *data.Anime) error {
 		AccessMode: pgx.ReadWrite,     // Specify read-write mode
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 
 	tx, err := a.db.BeginTx(ctx, opts)
@@ -67,12 +65,12 @@ func (a AnimeRepository) InsertAnime(anime *data.Anime) error {
 	}
 
 	// Get or insert new anime tags
-	tags, err := a.upsertTags(anime.Tags, tx)
+	tags, err := a.upsertTags(ctx, anime.Tags, tx)
 	if err != nil {
 		return a.logger.handleError(err)
 	}
 
-	err = a.insertAnimeTags(anime.ID, tags, tx)
+	err = a.insertAnimeTags(ctx, anime.ID, tags, tx)
 	if err != nil {
 		return a.logger.handleError(err)
 	}
@@ -122,7 +120,7 @@ func (a AnimeRepository) GetAnime(id int32) (*data.Anime, error) {
 		return nil, a.logger.handleError(err)
 	}
 
-	tags, err := a.getAnimeTags(id, tx)
+	tags, err := a.getAnimeTags(ctx, id, tx)
 	if err != nil {
 		return nil, a.logger.handleError(err)
 	}
@@ -136,7 +134,23 @@ func (a AnimeRepository) GetAnime(id int32) (*data.Anime, error) {
 	return &anime, nil
 }
 
-func (a AnimeRepository) GetAll(title string, status string, season string, animeType string, tags []string, filters data.Filters) ([]*data.Anime, error) {
+func (a AnimeRepository) GetAll(title string, status string, season string, animeType string, tags []string, filters data.Filters) ([]*data.Anime, data.Metadata, error) {
+	baseQuery := `
+	SELECT count(*) OVER(),
+		a.id, a.title, a.type, a.episodes,
+		a.status, a.season, a.year, a.duration,
+		ARRAY_AGG(t.name ORDER BY t.name) AS tags,
+		a.created_at, a.version
+	FROM anime a
+	JOIN anime_tags at ON a.id = at.anime_id
+	JOIN tag t ON at.tag_id = t.id
+	`
+
+	var args []interface{}
+	var conditions []string
+
+	var metadata data.Metadata
+
 	opts := pgx.TxOptions{
 		IsoLevel:   pgx.Serializable,
 		AccessMode: pgx.ReadOnly,
@@ -147,7 +161,8 @@ func (a AnimeRepository) GetAll(title string, status string, season string, anim
 
 	tx, err := a.db.BeginTx(ctx, opts)
 	if err != nil {
-		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
+		// return an empty Metadata struct.
+		return nil, metadata, a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
 	}
 
 	defer func() {
@@ -158,21 +173,6 @@ func (a AnimeRepository) GetAll(title string, status string, season string, anim
 			}
 		}
 	}()
-
-	baseQuery := `
-	SELECT
-		a.id, a.title, a.type, a.episodes,
-		a.status, a.season, a.year, a.duration,
-		ARRAY_AGG(t.name ORDER BY t.name) AS tags,
-		a.created_at, a.version
-	FROM anime a
-	JOIN anime_tags at ON a.id = at.anime_id
-	JOIN tag t ON at.tag_id = t.id
-	WHERE 1=1 
-	`
-
-	var args []interface{}
-	var conditions []string
 
 	if title != "" {
 		// Add wildcards in Go, use $n placeholder
@@ -201,7 +201,7 @@ func (a AnimeRepository) GetAll(title string, status string, season string, anim
 	// Combine query parts
 	query := baseQuery
 	if len(conditions) > 0 {
-		query += " AND " + strings.Join(conditions, " AND ")
+		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
 
 	if len(tags) > 0 {
@@ -224,40 +224,53 @@ func (a AnimeRepository) GetAll(title string, status string, season string, anim
 			args = append(args, strings.Title(t))
 		}
 
+		// could just do normal concat, but this way is prettier
 		query += fmt.Sprintf(" AND a.id IN (SELECT v.anime_id FROM valid_anime v)")
 	}
 
-	query += fmt.Sprintf(" GROUP BY a.id, a.title, a.type, a.episodes, a.status, a.season, a.year, a.duration, a.created_at, a.version;")
+	query += fmt.Sprintf(" GROUP BY a.id, a.title, a.type, a.episodes, a.status, a.season, a.year, a.duration, a.created_at, a.version")
+
+	// Add an ORDER BY clause and interpolate the sort column and direction. Importantly
+	// notice that we also include a secondary sort on the movie ID to ensure a consistent ordering.
+	query += fmt.Sprintf(" ORDER BY a.%s %s, a.id", filters.SortColumn(), filters.SortDirection())
+
+	// Update the SQL query to include the LIMIT and OFFSET clauses with placeholder
+	// parameter values.
+	query += fmt.Sprintf(" LIMIT $%d OFFSET $%d;", len(args)+1, len(args)+2)
+	args = append(args, filters.Limit(), filters.Offset())
 
 	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
-		return nil, a.logger.handleError(err)
+		return nil, metadata, a.logger.handleError(err)
 	}
 	defer rows.Close()
 
-	// Check if there are any rows
-	if !rows.Next() {
-		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrRecordNotFound, "anime not found"))
-	}
-
+	records := 0
 	anime := make([]*data.Anime, 0)
 	for rows.Next() {
 		var an data.Anime
 		if err = rows.Scan(
+			&records, // Scan the count from the window function into records.
 			&an.ID, &an.Title, &an.Type, &an.Episodes,
 			&an.Status, &an.Season, &an.Year, &an.Duration,
 			&an.Tags, &an.CreatedAt, &an.Version,
 		); err != nil {
-			return nil, a.logger.handleError(err)
+			return nil, metadata, a.logger.handleError(err)
 		}
+
 		anime = append(anime, &an)
 	}
 
+	// Generate a Metadata struct, passing in the total record count and pagination
+	// parameters from the client.
+	metadata.CalculateMetadata(records, filters.Page, filters.PageSize)
+
 	if err = tx.Commit(ctx); err != nil {
-		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
+		return nil, metadata, a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
 	}
 
-	return anime, nil
+	// Include the metadata struct when returning.
+	return anime, metadata, nil
 }
 
 // UpdateAnime Add a placeholder method for updating a specific record in the movies table.
@@ -310,19 +323,19 @@ func (a AnimeRepository) UpdateAnime(anime *data.Anime) error {
 	}
 
 	// Delete current anime tags
-	err = a.deleteAnimeTags(anime.ID, tx)
+	err = a.deleteAnimeTags(ctx, anime.ID, tx)
 	if err != nil {
 		return a.logger.handleError(err)
 	}
 
 	// Get or insert new tags
-	tags, err := a.upsertTags(anime.Tags, tx)
+	tags, err := a.upsertTags(ctx, anime.Tags, tx)
 	if err != nil {
 		return a.logger.handleError(err)
 	}
 
 	// Insert new anime tags
-	err = a.insertAnimeTags(anime.ID, tags, tx)
+	err = a.insertAnimeTags(ctx, anime.ID, tags, tx)
 	if err != nil {
 		return a.logger.handleError(err)
 	}
@@ -382,7 +395,7 @@ func (a AnimeRepository) DeleteAnime(id int32) error {
 		return a.logger.handleError(fmt.Errorf("%w: %s", ErrRecordNotFound, "no rows affected"))
 	}
 
-	err = a.deleteAnimeTags(id, tx)
+	err = a.deleteAnimeTags(ctx, id, tx)
 	if err != nil {
 		return a.logger.handleError(err)
 	}
@@ -390,116 +403,6 @@ func (a AnimeRepository) DeleteAnime(id int32) error {
 	// Commit transaction
 	if err = tx.Commit(ctx); err != nil {
 		return a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
-	}
-
-	return nil
-}
-
-// upsertTag will get or insert a tag by name, returning the tag id.
-func (a AnimeRepository) upsertTag(tag string, tx pgx.Tx) (int32, error) {
-	var tagId int32
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	err := tx.QueryRow(ctx, `INSERT INTO tag (name)
-		VALUES ($1)
-		ON CONFLICT (name) DO UPDATE SET name=excluded.name
-		RETURNING id`, tag).Scan(&tagId)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, err
-	}
-
-	return tagId, nil
-}
-
-// upsertTags will bulk upsert tags by name, returning the tag ids.
-// for this, use these options pgx.ReadCommitted, // or pgx.RepeatableRead
-// ReadCommitted: Ensures that transactions only see committed data, but allows for some level of concurrency.
-// RepeatableRead: Ensures that if a transaction reads a row, it will see the same data for the entire duration of the transaction,
-// but can still allow for some changes in data as long as it doesn't conflict with other transactions.
-func (a AnimeRepository) upsertTags(tags []string, tx pgx.Tx) ([]int32, error) {
-	var tagIds []int32
-
-	batch := &pgx.Batch{}
-	for _, tag := range tags {
-		// Batch adding the upsert statement for each tag
-		batch.Queue(`
-			INSERT INTO tag (name) 
-			VALUES ($1)
-			ON CONFLICT (name) DO UPDATE SET name=excluded.name
-			RETURNING id
-		`, tag)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	br := tx.SendBatch(ctx, batch)
-	defer func(br pgx.BatchResults) {
-		err := br.Close()
-		if err != nil {
-			a.logger.Error(ErrFailedCloseRows.Error(), "error", err)
-		}
-	}(br)
-
-	// Execute the batch and get the tag ids
-	for i := 0; i < len(tags); i++ {
-		var tagId int32
-		if err := br.QueryRow().Scan(&tagId); err != nil {
-			return nil, err
-		}
-
-		tagIds = append(tagIds, tagId)
-	}
-
-	return tagIds, nil
-}
-
-func (a AnimeRepository) getAnimeTags(id int32, tx pgx.Tx) ([]string, error) {
-	tags := make([]string, 0)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	rows, err := tx.Query(ctx, `SELECT t.name FROM tag t JOIN anime_tags at ON t.id = at.tag_id WHERE at.anime_id = $1`, id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var tag string
-		if err = rows.Scan(&tag); err != nil {
-			return nil, err
-		}
-		tags = append(tags, tag)
-	}
-
-	return tags, nil
-}
-
-func (a AnimeRepository) deleteAnimeTags(id int32, tx pgx.Tx) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	_, err := tx.Exec(ctx, `DELETE FROM anime_tags WHERE anime_id = $1`, id)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (a AnimeRepository) insertAnimeTags(id int32, tagsIds []int32, tx pgx.Tx) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	for _, tagId := range tagsIds {
-		_, err := tx.Exec(ctx, `INSERT INTO anime_tags (anime_id, tag_id) VALUES ($1, $2)`, id, tagId)
-		if err != nil {
-			return err
-		}
 	}
 
 	return nil

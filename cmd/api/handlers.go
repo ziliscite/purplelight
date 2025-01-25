@@ -79,13 +79,19 @@ func (app *application) listAnime(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call the GetAll() method on the movies repository to get a slice of Movie structs
-	anime, err := app.repos.Anime.GetAll(input.Title, input.Status, input.Season, input.AnimeType, input.Tags, input.Filters)
+	anime, metadata, err := app.repos.Anime.GetAll(input.Title, input.Status, input.Season, input.AnimeType, input.Tags, input.Filters)
 	if err != nil {
 		app.dbReadError(w, r, err)
 		return
 	}
 
-	err = app.write(w, http.StatusOK, envelope{"anime": anime}, nil)
+	// not sure if proceed with this or nah
+	if len(anime) == 0 {
+		app.notFound(w, r)
+		return
+	}
+
+	err = app.write(w, http.StatusOK, envelope{"anime": anime, "metadata": metadata}, nil)
 	if err != nil {
 		app.serverError(w, r, err)
 	}
@@ -224,6 +230,19 @@ func (app *application) partiallyUpdateAnime(w http.ResponseWriter, r *http.Requ
 	}
 
 	err = app.write(w, http.StatusOK, envelope{"anime": anime}, nil)
+	if err != nil {
+		app.serverError(w, r, err)
+	}
+}
+
+func (app *application) listTags(w http.ResponseWriter, r *http.Request) {
+	tags, err := app.repos.Anime.GetAllTags()
+	if err != nil {
+		app.dbReadError(w, r, err)
+		return
+	}
+
+	err = app.write(w, http.StatusOK, envelope{"tags": tags}, nil)
 	if err != nil {
 		app.serverError(w, r, err)
 	}
