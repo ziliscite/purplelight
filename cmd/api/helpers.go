@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/ziliscite/purplelight/internal/data"
 	"github.com/ziliscite/purplelight/internal/validator"
 	"io"
 	"net/http"
@@ -187,7 +186,7 @@ func (app *application) readString(qs url.Values, key string, defaultValue strin
 }
 
 // The readIota() helper returns a valid string value from the query string corresponding to accepted values.
-func (app *application) readIota(qs url.Values, key string, defaultValue string, types data.Enumify, v *validator.Validator) string {
+func (app *application) readIota(qs url.Values, key string, defaultValue string, v *validator.Validator, types func(string) (string, error)) string {
 	// Extract the value for a given key from the query string. If no key exists this
 	// will return the empty string "".
 	s := qs.Get(key)
@@ -198,7 +197,7 @@ func (app *application) readIota(qs url.Values, key string, defaultValue string,
 	}
 
 	// Validate the string to the iota.
-	st, err := types.ToEnum(s)
+	st, err := types(s)
 	if err != nil {
 		v.AddError(key, err.Error())
 		return defaultValue

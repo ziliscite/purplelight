@@ -126,14 +126,11 @@ func (aq *animeQuery) readQuery(qs url.Values, app *application, v *validator.Va
 
 	// Extract the status, season, and type query string values, falling back to the
 	// zero value for each type if they are not provided by the client.
-	var status data.Status
-	aq.Status = app.readIota(qs, "status", "", status, v)
+	aq.Status = app.readIota(qs, "status", "", v, data.StatusToEnum)
 
-	var season data.Season
-	aq.Season = app.readIota(qs, "season", "", season, v)
+	aq.Season = app.readIota(qs, "season", "", v, data.SeasonToEnum)
 
-	var animeType data.AnimeType
-	aq.AnimeType = app.readIota(qs, "anime_type", "", animeType, v)
+	aq.AnimeType = app.readIota(qs, "anime_type", "", v, data.TypeToEnum)
 
 	// Get the page and page_size query string values as integers. Notice that we set
 	// the default page value to 1 and default page_size to 20, and that we pass the
