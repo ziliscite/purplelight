@@ -4,7 +4,6 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 type AnimeType string
@@ -58,21 +57,4 @@ func (a *AnimeType) UnmarshalJSON(data []byte) error {
 	default:
 		return fmt.Errorf("%w AnimeType: %s", ErrInvalid, s)
 	}
-}
-
-var animeTypeMap = map[string]AnimeType{
-	"tv":      TV,
-	"movie":   Movie,
-	"ova":     OVA,
-	"ona":     ONA,
-	"special": Special,
-}
-
-func (a AnimeType) ToEnum(val string) (string, error) {
-	key := strings.ToLower(val)
-	if at, ok := animeTypeMap[key]; ok {
-		a.Set(string(at))
-		return a.String(), nil
-	}
-	return "", fmt.Errorf("%w AnimeType: %s", ErrInvalid, val)
 }

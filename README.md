@@ -528,7 +528,7 @@ The `plainto_tsquery('simple', $1)` function takes a search value and turns it i
 
 The `@@` operator is the matches operator. In our statement we are using it to check whether the generated query term matches the lexemes. To continue the example, the query term 'the' & 'club' will match rows which contain both lexemes 'the' and 'club'.
 
-// I was considering wildcards, then found out that this is way faster cuz of index. 
+// I was considering wildcards, then found out that this is way faster cuz of index.
 
 ```go
 func (m MovieModel) GetAll(title string, genres []string, filters Filters) ([]*Movie, error) {
@@ -578,7 +578,7 @@ ORDER BY id
 ```
 
 ### Using STRPOS and ILIKE
-The PostgreSQL `STRPOS()` function allows you to check for the existence of a substring in a particular database field. 
+The PostgreSQL `STRPOS()` function allows you to check for the existence of a substring in a particular database field.
 ```sql
 SELECT id, created_at, title, year, runtime, genres, version
 FROM movies
@@ -620,7 +620,7 @@ AND (genres @> $2 OR $2 = '{}')
 ORDER BY year DESC -- <-- Order the result by descending year
 ```
 
-The difficulty here is that the values for the ORDER BY clause will need to be generated at runtime based on the query string values from the client. 
+The difficulty here is that the values for the ORDER BY clause will need to be generated at runtime based on the query string values from the client.
 
 > Unfortunately it’s not possible to use placeholder parameters for column names or SQL keywords (including ASC and DESC).
 
