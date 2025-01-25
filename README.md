@@ -1,430 +1,314 @@
-# Chapter 10. Rate Limiting
-If you’re building an API for public use, then it’s quite likely that you’ll want to implement some form of rate limiting to prevent clients from making too many requests too quickly, and putting excessive strain on your server.
+# Chapter 11. Graceful Shutdown
 
-In this section of the book we’re going to create some middleware to help with that.
+In this next section of the book we’re going to talk about an important but often overlooked topic: `how to safely stop your running application`.
 
-Essentially, we want this middleware to check how many requests have been received in the last ‘N’ seconds and — if there have been too many — then it should send the client a 429 Too Many Requests response. We’ll position this middleware before our main application handlers, so that it carries out this check before we do any expensive processing like decoding a JSON request body or querying our database.
+At the moment, when we stop our API application (usually by pressing Ctrl+C) it is terminated immediately with no opportunity for in-flight HTTP requests to complete. This isn’t ideal for two reasons:
 
-- About the principles behind token-bucket rate-limiter algorithms and how we can apply them in the context of an API or web application.
-- How to create middleware to rate-limit requests to your API endpoints, first by making a single rate global limiter, then extending it to support per-client limiting based on IP address.
-- How to make rate limiter behavior configurable at runtime, including disabling the rate limiter altogether for testing purposes.
+- It means that clients won’t receive responses to their in-flight requests — all they will experience is a hard closure of the HTTP connection.
+- Any work being carried out by our handlers may be left in an incomplete state.
 
-## Global Rate Limiting
-This will consider all the requests that our API receives.
+We’re going to mitigate these problems by adding graceful shutdown functionality to our application, so that in-flight HTTP requests have the opportunity to finish being processed `before` the application is terminated.
 
-We will use `x/time/rate` package, which provides a tried-and-tested implementation of a token bucket rate limiter.
+- Shutdown signals — what they are, how to send them, and how to listen for them in your API application.
+- How to use these signals to trigger a graceful shutdown of the HTTP server using Go’s Shutdown() method.
+
+## Sending Shutdown Signals
+When our application is running, we can terminate it at any time by sending it a specific signal. A common way to do this, which you’ve probably been using, is by pressing Ctrl+C on your keyboard to send an interrupt signal — also known as a SIGINT.
+
+There are more signal:
+
+| Signal | Description | Keyboard shortcut | Catchable |
+| --- | --- | --- | --- |
+| SIGINT | Interrupt from keyboard | Ctrl+C | Yes |
+| SIGQUIT | Quit from keyboard | Ctrl+\ | Yes |
+| SIGKILL | Kill process (terminate immediately) | - | No |
+| SIGTERM | Terminate process in orderly manner | - | Yes |
+
+Catachable signals can be intercepted by our application and either ignored, or used to trigger a certain action (such as a graceful shutdown).
+
+Try running our app normally:
 ```shell
-$ go get golang.org/x/time/rate@latest
-go: downloading golang.org/x/time v0.6.0
-go: added golang.org/x/time v0.6.0
+$ go run ./cmd/api
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
 ```
 
-> A Limiter controls how frequently events are allowed to happen. It implements a “token bucket” of size b, initially full and refilled at rate r tokens per second.
-
-Putting that into the context of our API application...
-
-- We will have a bucket that starts with b tokens in it.
-- Each time we receive a HTTP request, we will remove one token from the bucket.
-- Every 1/r seconds, a token is added back to the bucket — up to a maximum of b total tokens.
-- If we receive a HTTP request and the bucket is empty, then we should return a 429 Too Many Requests response.
-
-In order to create a token bucket rate limiter from x/time/rate, we will need to use the NewLimiter() function. This has a signature which looks like this:
-```go
-// Note that the Limit type is an 'alias' for float64.
-func NewLimiter(r Limit, b int) *Limiter
-```
-
-So if we want to create a rate limiter which allows an average of 2 requests per second, with a maximum of 4 requests in a single ‘burst’, we could do so with the following code:
-```go
-// Allow 2 requests per second, with a maximum of 4 requests in a burst.
-limiter := rate.NewLimiter(2, 4)
-```
-
-### Enforcing a global rate limit
-One of the nice things about the middleware pattern that we are using is that it is straightforward to include ‘initialization’ code which only runs once when we wrap something with the middleware, rather than running on every request that the middleware handles.
-```go
-func (app *application) exampleMiddleware(next http.Handler) http.Handler {
-    
-    // Any code here will run only once, when we wrap something with the middleware. 
-
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        
-        // Any code here will run for every request that the middleware handles.
-
-        next.ServeHTTP(w, r)
-    })
-}
-```
-
-We’ll make a new rateLimit() middleware method which creates a new rate limiter as part of the ‘initialization’ code, and then uses this rate limiter for every request that it subsequently handles.
-```go
-func (app *application) rateLimit(next http.Handler) http.Handler {
-    // Initialize a new rate limiter which allows an average of 2 requests per second, 
-    // with a maximum of 4 requests in a single ‘burst’.
-    limiter := rate.NewLimiter(2, 4)
-
-    // The function we are returning is a closure, which 'closes over' the limiter 
-    // variable.
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        // Call limiter.Allow() to see if the request is permitted, and if it's not, 
-        // then we call the rateLimitExceededResponse() helper to return a 429 Too Many
-        // Requests response (we will create this helper in a minute).
-        if !limiter.Allow() {
-            app.rateLimitExceededResponse(w, r)
-            return
-        }
-
-        next.ServeHTTP(w, r)
-    })
-}
-```
-
-In this code, whenever we call the Allow() method on the rate limiter exactly one token will be consumed from the bucket. If there are no tokens left in the bucket, then Allow() will return false and that acts as the trigger for us send the client a 429 Too Many Requests response.
-
-```go
-func (app *application) rateLimitExceededResponse(w http.ResponseWriter, r *http.Request) {
-    message := "rate limit exceeded"
-    app.errorResponse(w, r, http.StatusTooManyRequests, message)
-}
-```
-
-in the cmd/api/routes.go file we want to add the rateLimit() middleware to our middleware chain. This should come `after` our panic recovery middleware (so that any panics in rateLimit() are recovered), but otherwise we want it to be used as early as possible to prevent unnecessary work for our server.
-```go
-func (app *application) routes() http.Handler {
-    router := httprouter.New()
-
-    router.NotFound = http.HandlerFunc(app.notFoundResponse)
-    router.MethodNotAllowed = http.HandlerFunc(app.methodNotAllowedResponse)
-
-    router.HandlerFunc(http.MethodGet, "/v1/healthcheck", app.healthcheckHandler)
-
-    router.HandlerFunc(http.MethodGet, "/v1/movies", app.listMoviesHandler)
-    router.HandlerFunc(http.MethodPost, "/v1/movies", app.createMovieHandler)
-    router.HandlerFunc(http.MethodGet, "/v1/movies/:id", app.showMovieHandler)
-    router.HandlerFunc(http.MethodPatch, "/v1/movies/:id", app.updateMovieHandler)
-    router.HandlerFunc(http.MethodDelete, "/v1/movies/:id", app.deleteMovieHandler)
-
-    // Wrap the router with the rateLimit() middleware.
-    return app.recoverPanic(app.rateLimit(router))
-}
-```
-
-Restart the API, then in another terminal window execute the following command to issue a batch of 6 requests to our GET /v1/healthcheck endpoint in quick succession.
+Doing this should start a process with the name api on your machine. You can use the pgrep command to verify that this process exists, like so:
 ```shell
-$ for i in {1..6}; do curl http://localhost:4000/v1/healthcheck; done
-{
-    "status": "available",
-    "system_info": {
-        "environment": "development",
-        "version": "1.0.0"
-    }
-}
-{
-    "status": "available",
-    "system_info": {
-        "environment": "development",
-        "version": "1.0.0"
-    }
-}
-{
-    "status": "available",
-    "system_info": {
-        "environment": "development",
-        "version": "1.0.0"
-    }
-}
-{
-    "status": "available",
-    "system_info": {
-        "environment": "development",
-        "version": "1.0.0"
-    }
-}
-{
-    "error": "rate limit exceeded"
-}
-{
-    "error": "rate limit exceeded"
-}
+$ pgrep -l api
+4414 api
 ```
-We can see from this that the first 4 requests succeed, due to our limiter being set up to permit a ‘burst’ of 4 requests in quick succession. But once those 4 requests were used up, the tokens in the bucket ran out and our API began to return the "rate limit exceeded" error response instead.
 
-## IP-based Rate Limiting
-Generally, its more common to want an individual rate limiter for each client than global rate limiting, so that one bad client making too many requests doesn’t affect all the others.
+Once that’s confirmed, go ahead and try sending a SIGKILL signal to the api process using the pkill command like so:
+```shell
+$ pkill -SIGKILL api
+```
 
-A conceptually straightforward way to implement this is to create an in-memory map of rate limiters, using the IP address for each client as the map key.
+If you go back to the terminal window that is running the API application, you should see that it has been terminated and the final line in the output stream is signal: killed. Similar to:
+```shell
+$ go run ./cmd/api
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
+signal: killed
+```
 
-// I assume for distributed systems, you would have a distributed key-value store, like Redis or Memcached. Or using a rate limiter from a reverse proxy like Nginx or HAProxy, which would have a global rate limiter.
+Sending a SIGTERM signal instead:
+```shell
+$ pkill -SIGTERM api
+```
 
-Each time a new client makes a request to our API, we will initialize a new rate limiter and add it to the map. For any subsequent requests, we will retrieve the client’s rate limiter from the map and check whether the request is permitted by calling its Allow() method, just like we did before.
+```shell
+$ go run ./cmd/api
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
+signal: terminated
+```
 
-Jump into the code and update our `rateLimit()` middleware
+Try sending a SIGQUIT signal — either by pressing Ctrl+\ on your keyboard or running pkill -SIGQUIT api. This will cause the application to exit with a stack dump
+```shell
+$ go run ./cmd/api
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
+SIGQUIT: quit
+PC=0x46ebe1 m=0 sigcode=0
+
+goroutine 0 [idle]:
+runtime.futex(0x964870, 0x80, 0x0, 0x0, 0x0, 0x964720, 0x7ffd551034f8, 0x964420, 0x7ffd55103508, 0x40dcbf, ...)
+        /usr/local/go/src/runtime/sys_linux_amd64.s:579 +0x21
+runtime.futexsleep(0x964870, 0x0, 0xffffffffffffffff)
+        /usr/local/go/src/runtime/os_linux.go:44 +0x46
+runtime.notesleep(0x964870)
+        /usr/local/go/src/runtime/lock_futex.go:159 +0x9f
+runtime.mPark()
+        /usr/local/go/src/runtime/proc.go:1340 +0x39
+runtime.stopm()
+        /usr/local/go/src/runtime/proc.go:2257 +0x92
+runtime.findrunnable(0xc00002c000, 0x0)
+        /usr/local/go/src/runtime/proc.go:2916 +0x72e
+runtime.schedule()
+        /usr/local/go/src/runtime/proc.go:3125 +0x2d7
+runtime.park_m(0xc000000180)
+        /usr/local/go/src/runtime/proc.go:3274 +0x9d
+runtime.mcall(0x0)
+        /usr/local/go/src/runtime/asm_amd64.s:327 +0x5b
+...
+```
+
+We can see that these signals are effective in terminating our application — but the problem we have is that they all cause our application to exit immediately.
+
+Fortunately, Go provides tools in the os/signals package that we can use to intercept catchable signals and trigger a graceful shutdown of our application.
+
+## Intercepting Shutdown Signals
+Before we get into the nuts and bolts of how to intercept signals, let’s move the code related to our http.Server out of the main() function and into a separate file.
+
+create a new cmd/api/server.go
 ```go
-func (app *application) rateLimit(next http.Handler) http.Handler {
-    // Declare a mutex and a map to hold the clients' IP addresses and rate limiters.
-    var (
-        mu      sync.Mutex
-        clients = make(map[string]*rate.Limiter)
-    )
+func (app *application) serve() error {
+    // Declare a HTTP server using the same settings as in our main() function.
+    srv := &http.Server{
+        Addr:         fmt.Sprintf(":%d", app.config.port),
+        Handler:      app.routes(),
+        IdleTimeout:  time.Minute,
+        ReadTimeout:  5 * time.Second,
+        WriteTimeout: 10 * time.Second,
+        ErrorLog:     slog.NewLogLogger(app.logger.Handler(), slog.LevelError),
+    }
 
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        // Extract the client's IP address from the request.
-        ip, _, err := net.SplitHostPort(r.RemoteAddr)
-        if err != nil {
-            app.serverErrorResponse(w, r, err)
-            return
-        }
+    // Likewise log a "starting server" message.
+    app.logger.Info("starting server", "addr", srv.Addr, "env", app.config.env)
 
-        // Lock the mutex to prevent this code from being executed concurrently.
-        mu.Lock()
-
-        // Check to see if the IP address already exists in the map. If it doesn't, then
-        // initialize a new rate limiter and add the IP address and limiter to the map.
-        if _, found := clients[ip]; !found {
-            clients[ip] = rate.NewLimiter(2, 4)
-        }
-
-        // Call the Allow() method on the rate limiter for the current IP address. If
-        // the request isn't allowed, unlock the mutex and send a 429 Too Many Requests
-        // response, just like before.
-        if !clients[ip].Allow() {
-            mu.Unlock()
-            app.rateLimitExceededResponse(w, r)
-            return
-        }
-
-        // Very importantly, unlock the mutex before calling the next handler in the
-        // chain. Notice that we DON'T use defer to unlock the mutex, as that would mean
-        // that the mutex isn't unlocked until all the handlers downstream of this 
-        // middleware have also returned.
-        mu.Unlock()
-
-        next.ServeHTTP(w, r)
-    })
+    // Start the server as normal, returning any error.
+    return srv.ListenAndServe()
 }
 ```
 
-### Deleting old limiters
-The code above will work, but there’s a slight problem — the clients map will grow indefinitely, taking up more and more resources with every new IP address and rate limiter that we add.
-
-To prevent this, let’s update our code so that we also record the last seen time for each client. We can then run a background goroutine in which we periodically delete any clients that we haven’t been seen recently from the clients map.
 ```go
-func (app *application) rateLimit(next http.Handler) http.Handler {
-    // Define a client struct to hold the rate limiter and last seen time for each
-    // client.
-    type client struct {
-        limiter  *rate.Limiter
-        lastSeen time.Time
+// Call app.serve() to start the server.
+err = app.serve()
+if err != nil {
+    logger.Error(err.Error())
+    os.Exit(1)
+}
+```
+
+### Catching SIGINT and SIGTERM signals
+The next thing that we want to do is update our application so that it ‘catches’ any SIGINT and SIGTERM signals.
+
+To catch the signals, we’ll need to spin up a background goroutine which runs for the lifetime of our application. In this background goroutine, we can use the signal.Notify() function to listen for specific signals and relay them to a channel for further processing.
+
+```go
+func (app *application) serve() error {
+    srv := &http.Server{
+        Addr:         fmt.Sprintf(":%d", app.config.port),
+        Handler:      app.routes(),
+        IdleTimeout:  time.Minute,
+        ReadTimeout:  5 * time.Second,
+        WriteTimeout: 10 * time.Second,
+        ErrorLog:     slog.NewLogLogger(app.logger.Handler(), slog.LevelError),
     }
 
-    var (
-        mu sync.Mutex
-        // Update the map so the values are pointers to a client struct.
-        clients = make(map[string]*client)
-    )
-
-    // Launch a background goroutine which removes old entries from the clients map once
-    // every minute.
+    // Start a background goroutine.
     go func() {
-        for {
-            time.Sleep(time.Minute)
+        // Create a quit channel which carries os.Signal values.
+        quit := make(chan os.Signal, 1)
 
-            // Lock the mutex to prevent any rate limiter checks from happening while
-            // the cleanup is taking place.
-            mu.Lock()
+        // Use signal.Notify() to listen for incoming SIGINT and SIGTERM signals and 
+        // relay them to the quit channel. Any other signals will not be caught by
+        // signal.Notify() and will retain their default behavior.
+        signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-            // Loop through all clients. If they haven't been seen within the last three
-            // minutes, delete the corresponding entry from the map.
-            for ip, client := range clients {
-                if time.Since(client.lastSeen) > 3*time.Minute {
-                    delete(clients, ip)
-                }
-            }
+        // Read the signal from the quit channel. This code will block until a signal is
+        // received.
+        s := <-quit
 
-            // Importantly, unlock the mutex when the cleanup is complete.
-            mu.Unlock()
-        }
+        // Log a message to say that the signal has been caught. Notice that we also
+        // call the String() method on the signal to get the signal name and include it
+        // in the log entry attributes.
+        app.logger.Info("caught signal", "signal", s.String())
+
+        // Exit the application with a 0 (success) status code.
+        os.Exit(0)
     }()
 
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        ip, _, err := net.SplitHostPort(r.RemoteAddr)
-        if err != nil {
-            app.serverErrorResponse(w, r, err)
-            return
-        }
+    // Start the server as normal.
+    app.logger.Info("starting server", "addr", srv.Addr, "env", app.config.env)
 
-        mu.Lock()
-
-        if _, found := clients[ip]; !found {
-            // Create and add a new client struct to the map if it doesn't already exist.
-            clients[ip] = &client{limiter: rate.NewLimiter(2, 4)}
-        }
-
-        // Update the last seen time for the client.
-        clients[ip].lastSeen = time.Now()
-
-        if !clients[ip].limiter.Allow() {
-            mu.Unlock()
-            app.rateLimitExceededResponse(w, r)
-            return
-        }
-
-        mu.Unlock()
-
-        next.ServeHTTP(w, r)
-    })
+    return srv.ListenAndServe()
 }
 ```
 
-Test
-```shell
-$ for i in {1..6}; do curl  http://localhost:4000/v1/healthcheck; done
-{
-    "status": "available",
-    "system_info": {
-        "environment": "development",
-        "version": "1.0.0"
-    }
-}
-{
-    "status": "available",
-    "system_info": {
-        "environment": "development",
-        "version": "1.0.0"
-    }
-}
-{
-    "status": "available",
-    "system_info": {
-        "environment": "development",
-        "version": "1.0.0"
-    }
-}
-{
-    "status": "available",
-    "system_info": {
-        "environment": "development",
-        "version": "1.0.0"
-    }
-}
-{
-    "error": "rate limit exceeded"
-}
-{
-    "error": "rate limit exceeded"
-}
-```
+> Our quit channel is a buffered channel with size 1.
 
-### Distributed applications
-Using this pattern for rate-limiting will only work if your API application is running on a single-machine. If your infrastructure is distributed, with your application running on multiple servers behind a load balancer, then you’ll need to use an alternative approach.  
-If you’re using HAProxy or Nginx as a load balancer or reverse proxy, both of these have built-in functionality for rate limiting that it would probably be sensible to use. Alternatively, you could use a fast database like Redis to maintain a request count for clients, running on a server which all your application servers can communicate with.
+We need to use a buffered channel here because signal.Notify() does not wait for a receiver to be available when sending a signal to the quit channel. If we had used a regular (non-buffered) channel here instead, a signal could be ‘missed’ if our quit channel is not ready to receive at the exact moment that the signal is sent. By using a buffered channel, we avoid this problem and ensure that we never miss a signal.
 
-
-## Configuring the Rate Limiters
-At the moment our requests-per-second and burst values are hard-coded into the rateLimit() middleware. This is OK, but it would be more flexible if they were configurable at runtime instead.
-
-Likewise, it would be useful to have an easy way to turn off rate limiting altogether (which is useful when you want to run benchmarks or carry out load testing, when all requests might be coming from a small number of IP addresses).
-
+Run the application and then press Ctrl+C on your keyboard to send a SIGINT signal. You should see a "caught signal" 
 ```go
-type config struct {
-    port int
-    env  string
-    db   struct {
-        dsn          string
-        maxOpenConns int
-        maxIdleConns int
-        maxIdleTime  time.Duration
-    }
-    // Add a new limiter struct containing fields for the requests-per-second and burst
-    // values, and a boolean field which we can use to enable/disable rate limiting
-    // altogether.
-    limiter struct {
-        rps     float64
-        burst   int
-        enabled bool
-    }
-}
-...
-
-func main() {
-    var cfg config
-
-    flag.IntVar(&cfg.port, "port", 4000, "API server port")
-    flag.StringVar(&cfg.env, "env", "development", "Environment (development|staging|production)")
-
-    flag.StringVar(&cfg.db.dsn, "db-dsn", os.Getenv("GREENLIGHT_DB_DSN"), "PostgreSQL DSN")
-
-    flag.IntVar(&cfg.db.maxOpenConns, "db-max-open-conns", 25, "PostgreSQL max open connections")
-    flag.IntVar(&cfg.db.maxIdleConns, "db-max-idle-conns", 25, "PostgreSQL max idle connections")
-    flag.DurationVar(&cfg.db.maxIdleTime, "db-max-idle-time", 15*time.Minute, "PostgreSQL max connection idle time")
-
-    // Create command line flags to read the setting values into the config struct. 
-    // Notice that we use true as the default for the 'enabled' setting?
-    flag.Float64Var(&cfg.limiter.rps, "limiter-rps", 2, "Rate limiter maximum requests per second")
-    flag.IntVar(&cfg.limiter.burst, "limiter-burst", 4, "Rate limiter maximum burst")
-    flag.BoolVar(&cfg.limiter.enabled, "limiter-enabled", true, "Enable rate limiter")
-
-    flag.Parse()
-
-    ...
-}
-```
-
-```go
-func (app *application) rateLimit(next http.Handler) http.Handler {
-    
-    ...
-    
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        // Only carry out the check if rate limiting is enabled.
-        if app.config.limiter.enabled {
-            ip, _, err := net.SplitHostPort(r.RemoteAddr)
-            if err != nil {
-                app.serverErrorResponse(w, r, err)
-                return
-            }
-
-            mu.Lock()
-
-            if _, found := clients[ip]; !found {
-                clients[ip] = &client{
-                    // Use the requests-per-second and burst values from the config
-                    // struct.
-                    limiter: rate.NewLimiter(rate.Limit(app.config.limiter.rps), app.config.limiter.burst),
-                }
-            }
-
-            clients[ip].lastSeen = time.Now()
-
-            if !clients[ip].limiter.Allow() {
-                mu.Unlock()
-                app.rateLimitExceededResponse(w, r)
-                return
-            }
-
-            mu.Unlock()
-        }
-
-        next.ServeHTTP(w, r)
-    })
-}
-```
-
-Once that’s done, let’s try this out by running the API with the -limiter-burst flag and the burst value reduced to 2:
-```shell
-$ go run ./cmd/api/ -limiter-burst=2
+$ go run ./cmd/api
 time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
 time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
+time=2023-09-10T10:59:14.345+02:00 level=INFO msg="caught signal" signal=interrupt
 ```
 
-Similarly, you can try disabling the rate limiter altogether with the -limiter-enabled=false flag like so:
-```shell
-$ go run ./cmd/api/ -limiter-enabled=false
+You can also restart the application and try sending a SIGTERM signal.
+```go
+$ pkill -SIGTERM api
+
+$ go run ./cmd/api
 time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
 time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
+time=2023-09-10T10:59:14.345+02:00 level=INFO msg="caught signal" signal=terminated
 ```
 
-// this flag thing, its done at runtime? I guess it would make sense to check it on the middleware
-// or else, I would do the checking on the router...
+In contrast, sending a SIGKILL or SIGQUIT signal will continue to cause the application to exit immediately without the signal being caught.
+
+## Executing the Shutdown
+We’re going to update our application so that the SIGINT and SIGTERM signals we intercept trigger a graceful shutdown of our API.
+
+Specifically, after receiving one of these signals we will call the Shutdown() method on our HTTP server.
+
+> Shutdown gracefully shuts down the server without interrupting any active connections. Shutdown works by first closing all open listeners, then closing all idle connections, and then waiting indefinitely for connections to return to idle and then shut down.
+
+```go
+func (app *application) serve() error {
+    srv := &http.Server{
+        Addr:         fmt.Sprintf(":%d", app.config.port),
+        Handler:      app.routes(),
+        IdleTimeout:  time.Minute,
+        ReadTimeout:  5 * time.Second,
+        WriteTimeout: 10 * time.Second,
+        ErrorLog:     slog.NewLogLogger(app.logger.Handler(), slog.LevelError),
+    }
+
+    // Create a shutdownError channel. We will use this to receive any errors returned
+    // by the graceful Shutdown() function.
+    shutdownError := make(chan error)
+
+    go func() {
+        // Intercept the signals, as before.
+        quit := make(chan os.Signal, 1)
+        signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+        s := <-quit
+
+        // Update the log entry to say "shutting down server" instead of "caught signal".
+        app.logger.Info("shutting down server", "signal", s.String())
+
+        // Create a context with a 30-second timeout.
+        ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+        defer cancel()
+
+        // Call Shutdown() on our server, passing in the context we just made.
+        // Shutdown() will return nil if the graceful shutdown was successful, or an
+        // error (which may happen because of a problem closing the listeners, or 
+        // because the shutdown didn't complete before the 30-second context deadline is
+        // hit). We relay this return value to the shutdownError channel.
+        shutdownError <- srv.Shutdown(ctx)
+    }()
+
+    app.logger.Info("starting server", "addr", srv.Addr, "env", app.config.env)
+
+    // Calling Shutdown() on our server will cause ListenAndServe() to immediately 
+    // return a http.ErrServerClosed error. So if we see this error, it is actually a
+    // good thing and an indication that the graceful shutdown has started. So we check 
+    // specifically for this, only returning the error if it is NOT http.ErrServerClosed. 
+    err := srv.ListenAndServe()
+    if !errors.Is(err, http.ErrServerClosed) {
+        return err
+    }
+
+    // Otherwise, we wait to receive the return value from Shutdown() on the  
+    // shutdownError channel. If return value is an error, we know that there was a
+    // problem with the graceful shutdown and we return the error.
+    err = <-shutdownError
+    if err != nil {
+        return err
+    }
+
+    // At this point we know that the graceful shutdown completed successfully and we 
+    // log a "stopped server" message.
+    app.logger.Info("stopped server", "addr", srv.Addr)
+
+    return nil
+}
+```
+
+At first glance this code might seem a bit complex, but at a high-level what it’s doing can be summarized very simply: when we receive a SIGINT or SIGTERM signal, we instruct our server to stop accepting any new HTTP requests, and give any in-flight requests a ‘grace period’ of 30 seconds to complete before the application is terminated.
+
+It’s important to be aware that the Shutdown() method does not wait for any background tasks to complete, nor does it close hijacked long-lived connections like WebSockets. Instead, you will need to implement your own logic to coordinate a graceful shutdown of these things.
+
+To help demonstrate the graceful shutdown functionality, you can add a 4 second sleep delay to the healthcheckHandler method
+```go
+func (app *application) healthcheckHandler(w http.ResponseWriter, r *http.Request) {
+    env := envelope{
+        "status": "available",
+        "system_info": map[string]string{
+            "environment": app.config.env,
+            "version":     version,
+        },
+    }
+
+    // Add a 4 second delay.
+    time.Sleep(4 * time.Second)
+
+    err := app.writeJSON(w, http.StatusOK, env, nil)
+    if err != nil {
+        app.serverErrorResponse(w, r, err)
+    }
+}
+```
+
+Then start the API, and in another terminal window issue a request to the healthcheck endpoint followed by a SIGTERM signal.
+```shell
+$ curl localhost:4000/v1/healthcheck & pkill -SIGTERM api
+```
+
+When shutting down, after a 4 second delay
+```shell
+$ go run ./cmd/api
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
+time=2023-09-10T10:59:14.722+02:00 level=INFO msg="shutting down server" signal=terminated
+time=2023-09-10T10:59:18.722+02:00 level=INFO msg="stopped server" addr=:4000
+```
+
 
 

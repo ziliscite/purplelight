@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ziliscite/purplelight/internal/repository"
 	"log/slog"
-	"net/http"
 	"os"
 	"time"
 )
@@ -48,18 +46,9 @@ func main() {
 		repos:  repository.NewRepositories(db, logger),
 	}
 
-	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.port),
-		Handler:      app.routes(),
-		IdleTimeout:  time.Minute,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		ErrorLog:     slog.NewLogLogger(logger.Handler(), slog.LevelError),
-	}
-
-	logger.Info("starting server", "addr", srv.Addr, "env", cfg.Env())
-
-	if err := srv.ListenAndServe(); err != nil {
+	// Call app.serve() to start the server.
+	err = app.serve()
+	if err != nil {
 		logger.Error(err.Error())
 		os.Exit(1)
 	}
