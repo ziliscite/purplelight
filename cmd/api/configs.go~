@@ -2,6 +2,8 @@ package main
 
 import (
 	"flag"
+	"github.com/joho/godotenv"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -42,11 +44,10 @@ func GetConfig() Config {
 	once.Do(func() {
 		instance = Config{}
 
-		// turn off godotenv cuz I've configured the environment alr
-		//err := godotenv.Load()
-		//if err != nil {
-		//	log.Fatal("Error loading .env file")
-		//}
+		err := godotenv.Load()
+		if err != nil {
+			log.Fatal("Error loading .env file")
+		}
 
 		// Read the value of the port and env command-line flags into the config struct. We
 		// default to using the port number 4000 and the environment "development" if no

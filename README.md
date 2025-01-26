@@ -1,466 +1,314 @@
-# Chapter 12. User Model Setup and Registration
-In the upcoming sections of this book, we’re going to shift our focus towards users: registering them, activating them, authenticating them, and restricting access to our API endpoints depending on the permissions that they have.
+# Chapter 11. Graceful Shutdown
 
-But before we can do these things, we need to lay some groundwork. Specifically we need to:
+In this next section of the book we’re going to talk about an important but often overlooked topic: `how to safely stop your running application`.
 
-- Create a new users table in PostgreSQL for storing our user data.
-- Create a UserModel which contains the code for interacting with our users table, validating user data, and hashing user passwords.
-- Develop a POST /v1/users endpoint which can be used to register new users in our application.
+At the moment, when we stop our API application (usually by pressing Ctrl+C) it is terminated immediately with no opportunity for in-flight HTTP requests to complete. This isn’t ideal for two reasons:
 
-## Setting up the Users Database Table
-Let’s begin by creating a new users table in our database.
+- It means that clients won’t receive responses to their in-flight requests — all they will experience is a hard closure of the HTTP connection.
+- Any work being carried out by our handlers may be left in an incomplete state.
+
+We’re going to mitigate these problems by adding graceful shutdown functionality to our application, so that in-flight HTTP requests have the opportunity to finish being processed `before` the application is terminated.
+
+- Shutdown signals — what they are, how to send them, and how to listen for them in your API application.
+- How to use these signals to trigger a graceful shutdown of the HTTP server using Go’s Shutdown() method.
+
+## Sending Shutdown Signals
+When our application is running, we can terminate it at any time by sending it a specific signal. A common way to do this, which you’ve probably been using, is by pressing Ctrl+C on your keyboard to send an interrupt signal — also known as a SIGINT.
+
+There are more signal:
+
+| Signal | Description | Keyboard shortcut | Catchable |
+| --- | --- | --- | --- |
+| SIGINT | Interrupt from keyboard | Ctrl+C | Yes |
+| SIGQUIT | Quit from keyboard | Ctrl+\ | Yes |
+| SIGKILL | Kill process (terminate immediately) | - | No |
+| SIGTERM | Terminate process in orderly manner | - | Yes |
+
+Catachable signals can be intercepted by our application and either ignored, or used to trigger a certain action (such as a graceful shutdown).
+
+Try running our app normally:
 ```shell
-$ migrate create -seq -ext sql -dir ./migrations create_users_table
-C:\Users\manzi\GolandProjects\purplelight\migrations\000003_create_users_table.up.sql
-C:\Users\manzi\GolandProjects\purplelight\migrations\000003_create_users_table.down.sql
+$ go run ./cmd/api
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
 ```
 
-Up
-```sql
-CREATE TABLE IF NOT EXISTS users (
-    id bigserial PRIMARY KEY,
-    created_at timestamp(0) with time zone NOT NULL DEFAULT NOW(),
-    name text NOT NULL,
-    email citext UNIQUE NOT NULL,
-    password_hash bytea NOT NULL,
-    activated bool NOT NULL,
-    version integer NOT NULL DEFAULT 1
-);
-```
-
-Down
-```sql
-DROP TABLE IF EXISTS users;
-```
-
-There are a few interesting about this CREATE TABLE statement:  
-- The email column has the type citext (case-insensitive text). This type stores text data exactly as it is inputted — without changing the case in any way — but comparisons against the data are always case-insensitive… including lookups on associated indexes.
-- We’ve also got a UNIQUE constraint on the email column. Combined with the citext type, this means that no two rows in the database can have the same email value — even if they have different cases. This essentially enforces a database-level business rule that `no two users should exist with the same email` address.
-- The password_hash column has the type bytea (binary string). In this column we’ll store a one-way hash of the user’s password generated using bcrypt — not the plaintext password itself.
-- The activated column stores a boolean value to denote whether a user account is ‘active’ or not. We will set this to false by default when creating a new user, and require the user to confirm their email address before we set it to true.
-- We’ve also included a version number column, which we will increment each time a user record is updated. This will allow us to use optimistic locking to prevent race conditions when updating user records, in the same way that we did with movies earlier in the book.
-
-Execute the migration using the following command:
+Doing this should start a process with the name api on your machine. You can use the pgrep command to verify that this process exists, like so:
 ```shell
-migrate -path ./migrations -database %PURPLELIGHT_DSN% up
+$ pgrep -l api
+4414 api
 ```
 
-One important thing to point out here: the UNIQUE constraint on our email column has automatically been assigned the name users_email_key.
-
-## Setting up the Users Model
-We are going to update our internal/data package to contain a new User struct (to represent the data for an individual user), and create a UserModel type (which we will use to perform various SQL queries against our users table).
-
-Start by defining the User struct, along with some helper methods for setting and verifying the password for a user.
-
-The first thing we need to do is install the golang.org/x/crypto/bcrypt package
+Once that’s confirmed, go ahead and try sending a SIGKILL signal to the api process using the pkill command like so:
 ```shell
-go get golang.org/x/crypto/bcrypt@latest
+$ pkill -SIGKILL api
 ```
 
-In the internal/data/users.go file
+If you go back to the terminal window that is running the API application, you should see that it has been terminated and the final line in the output stream is signal: killed. Similar to:
+```shell
+$ go run ./cmd/api
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
+signal: killed
+```
+
+Sending a SIGTERM signal instead:
+```shell
+$ pkill -SIGTERM api
+```
+
+```shell
+$ go run ./cmd/api
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
+signal: terminated
+```
+
+Try sending a SIGQUIT signal — either by pressing Ctrl+\ on your keyboard or running pkill -SIGQUIT api. This will cause the application to exit with a stack dump
+```shell
+$ go run ./cmd/api
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
+SIGQUIT: quit
+PC=0x46ebe1 m=0 sigcode=0
+
+goroutine 0 [idle]:
+runtime.futex(0x964870, 0x80, 0x0, 0x0, 0x0, 0x964720, 0x7ffd551034f8, 0x964420, 0x7ffd55103508, 0x40dcbf, ...)
+        /usr/local/go/src/runtime/sys_linux_amd64.s:579 +0x21
+runtime.futexsleep(0x964870, 0x0, 0xffffffffffffffff)
+        /usr/local/go/src/runtime/os_linux.go:44 +0x46
+runtime.notesleep(0x964870)
+        /usr/local/go/src/runtime/lock_futex.go:159 +0x9f
+runtime.mPark()
+        /usr/local/go/src/runtime/proc.go:1340 +0x39
+runtime.stopm()
+        /usr/local/go/src/runtime/proc.go:2257 +0x92
+runtime.findrunnable(0xc00002c000, 0x0)
+        /usr/local/go/src/runtime/proc.go:2916 +0x72e
+runtime.schedule()
+        /usr/local/go/src/runtime/proc.go:3125 +0x2d7
+runtime.park_m(0xc000000180)
+        /usr/local/go/src/runtime/proc.go:3274 +0x9d
+runtime.mcall(0x0)
+        /usr/local/go/src/runtime/asm_amd64.s:327 +0x5b
+...
+```
+
+We can see that these signals are effective in terminating our application — but the problem we have is that they all cause our application to exit immediately.
+
+Fortunately, Go provides tools in the os/signals package that we can use to intercept catchable signals and trigger a graceful shutdown of our application.
+
+## Intercepting Shutdown Signals
+Before we get into the nuts and bolts of how to intercept signals, let’s move the code related to our http.Server out of the main() function and into a separate file.
+
+create a new cmd/api/server.go
 ```go
-// Define a User struct to represent an individual user. Importantly, notice how we are 
-// using the json:"-" struct tag to prevent the Password and Version fields appearing in
-// any output when we encode it to JSON. Also notice that the Password field uses the
-// custom password type defined below.
-type User struct {
-    ID        int64     `json:"id"`
-    CreatedAt time.Time `json:"created_at"`
-    Name      string    `json:"name"`
-    Email     string    `json:"email"`
-    Password  password  `json:"-"`
-    Activated bool      `json:"activated"`
-    Version   int       `json:"-"`
-}
+func (app *application) serve() error {
+    // Declare a HTTP server using the same settings as in our main() function.
+    srv := &http.Server{
+        Addr:         fmt.Sprintf(":%d", app.config.port),
+        Handler:      app.routes(),
+        IdleTimeout:  time.Minute,
+        ReadTimeout:  5 * time.Second,
+        WriteTimeout: 10 * time.Second,
+        ErrorLog:     slog.NewLogLogger(app.logger.Handler(), slog.LevelError),
+    }
 
-// Create a custom password type which is a struct containing the plaintext and hashed 
-// versions of the password for a user. The plaintext field is a *pointer* to a string,
-// so that we're able to distinguish between a plaintext password not being present in 
-// the struct at all, versus a plaintext password which is the empty string "".
-type password struct {
-    plaintext *string
-    hash      []byte
-}
+    // Likewise log a "starting server" message.
+    app.logger.Info("starting server", "addr", srv.Addr, "env", app.config.env)
 
-// The Set() method calculates the bcrypt hash of a plaintext password, and stores both 
-// the hash and the plaintext versions in the struct.
-func (p *password) Set(plaintextPassword string) error {
-    hash, err := bcrypt.GenerateFromPassword([]byte(plaintextPassword), 12)
+    // Start the server as normal, returning any error.
+    return srv.ListenAndServe()
+}
+```
+
+```go
+// Call app.serve() to start the server.
+err = app.serve()
+if err != nil {
+    logger.Error(err.Error())
+    os.Exit(1)
+}
+```
+
+### Catching SIGINT and SIGTERM signals
+The next thing that we want to do is update our application so that it ‘catches’ any SIGINT and SIGTERM signals.
+
+To catch the signals, we’ll need to spin up a background goroutine which runs for the lifetime of our application. In this background goroutine, we can use the signal.Notify() function to listen for specific signals and relay them to a channel for further processing.
+
+```go
+func (app *application) serve() error {
+    srv := &http.Server{
+        Addr:         fmt.Sprintf(":%d", app.config.port),
+        Handler:      app.routes(),
+        IdleTimeout:  time.Minute,
+        ReadTimeout:  5 * time.Second,
+        WriteTimeout: 10 * time.Second,
+        ErrorLog:     slog.NewLogLogger(app.logger.Handler(), slog.LevelError),
+    }
+
+    // Start a background goroutine.
+    go func() {
+        // Create a quit channel which carries os.Signal values.
+        quit := make(chan os.Signal, 1)
+
+        // Use signal.Notify() to listen for incoming SIGINT and SIGTERM signals and 
+        // relay them to the quit channel. Any other signals will not be caught by
+        // signal.Notify() and will retain their default behavior.
+        signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+        // Read the signal from the quit channel. This code will block until a signal is
+        // received.
+        s := <-quit
+
+        // Log a message to say that the signal has been caught. Notice that we also
+        // call the String() method on the signal to get the signal name and include it
+        // in the log entry attributes.
+        app.logger.Info("caught signal", "signal", s.String())
+
+        // Exit the application with a 0 (success) status code.
+        os.Exit(0)
+    }()
+
+    // Start the server as normal.
+    app.logger.Info("starting server", "addr", srv.Addr, "env", app.config.env)
+
+    return srv.ListenAndServe()
+}
+```
+
+> Our quit channel is a buffered channel with size 1.
+
+We need to use a buffered channel here because signal.Notify() does not wait for a receiver to be available when sending a signal to the quit channel. If we had used a regular (non-buffered) channel here instead, a signal could be ‘missed’ if our quit channel is not ready to receive at the exact moment that the signal is sent. By using a buffered channel, we avoid this problem and ensure that we never miss a signal.
+
+Run the application and then press Ctrl+C on your keyboard to send a SIGINT signal. You should see a "caught signal" 
+```go
+$ go run ./cmd/api
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
+time=2023-09-10T10:59:14.345+02:00 level=INFO msg="caught signal" signal=interrupt
+```
+
+You can also restart the application and try sending a SIGTERM signal.
+```go
+$ pkill -SIGTERM api
+
+$ go run ./cmd/api
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
+time=2023-09-10T10:59:14.345+02:00 level=INFO msg="caught signal" signal=terminated
+```
+
+In contrast, sending a SIGKILL or SIGQUIT signal will continue to cause the application to exit immediately without the signal being caught.
+
+## Executing the Shutdown
+We’re going to update our application so that the SIGINT and SIGTERM signals we intercept trigger a graceful shutdown of our API.
+
+Specifically, after receiving one of these signals we will call the Shutdown() method on our HTTP server.
+
+> Shutdown gracefully shuts down the server without interrupting any active connections. Shutdown works by first closing all open listeners, then closing all idle connections, and then waiting indefinitely for connections to return to idle and then shut down.
+
+```go
+func (app *application) serve() error {
+    srv := &http.Server{
+        Addr:         fmt.Sprintf(":%d", app.config.port),
+        Handler:      app.routes(),
+        IdleTimeout:  time.Minute,
+        ReadTimeout:  5 * time.Second,
+        WriteTimeout: 10 * time.Second,
+        ErrorLog:     slog.NewLogLogger(app.logger.Handler(), slog.LevelError),
+    }
+
+    // Create a shutdownError channel. We will use this to receive any errors returned
+    // by the graceful Shutdown() function.
+    shutdownError := make(chan error)
+
+    go func() {
+        // Intercept the signals, as before.
+        quit := make(chan os.Signal, 1)
+        signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+        s := <-quit
+
+        // Update the log entry to say "shutting down server" instead of "caught signal".
+        app.logger.Info("shutting down server", "signal", s.String())
+
+        // Create a context with a 30-second timeout.
+        ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+        defer cancel()
+
+        // Call Shutdown() on our server, passing in the context we just made.
+        // Shutdown() will return nil if the graceful shutdown was successful, or an
+        // error (which may happen because of a problem closing the listeners, or 
+        // because the shutdown didn't complete before the 30-second context deadline is
+        // hit). We relay this return value to the shutdownError channel.
+        shutdownError <- srv.Shutdown(ctx)
+    }()
+
+    app.logger.Info("starting server", "addr", srv.Addr, "env", app.config.env)
+
+    // Calling Shutdown() on our server will cause ListenAndServe() to immediately 
+    // return a http.ErrServerClosed error. So if we see this error, it is actually a
+    // good thing and an indication that the graceful shutdown has started. So we check 
+    // specifically for this, only returning the error if it is NOT http.ErrServerClosed. 
+    err := srv.ListenAndServe()
+    if !errors.Is(err, http.ErrServerClosed) {
+        return err
+    }
+
+    // Otherwise, we wait to receive the return value from Shutdown() on the  
+    // shutdownError channel. If return value is an error, we know that there was a
+    // problem with the graceful shutdown and we return the error.
+    err = <-shutdownError
     if err != nil {
         return err
     }
 
-    p.plaintext = &plaintextPassword
-    p.hash = hash
-
-    return nil
-}
-
-// The Matches() method checks whether the provided plaintext password matches the 
-// hashed password stored in the struct, returning true if it matches and false 
-// otherwise.
-func (p *password) Matches(plaintextPassword string) (bool, error) {
-    err := bcrypt.CompareHashAndPassword(p.hash, []byte(plaintextPassword))
-    if err != nil {
-        switch {
-        case errors.Is(err, bcrypt.ErrMismatchedHashAndPassword):
-            return false, nil
-        default:
-            return false, err
-        }
-    }
-
-    return true, nil
-}
-```
-
-- The bcrypt.GenerateFromPassword() function generates a bcrypt hash of a password using a specific cost parameter (in the code above, we use a cost of 12). The higher the cost, the slower and more computationally expensive it is to generate the hash. There is a balance to be struck here — we want the cost to be prohibitively expensive for attackers, but also not so slow that it harms the user experience of our API. This function returns a hash string in the format:  
-`$2b$[cost]$[22-character salt][31-character hash]`
-
-- The bcrypt.CompareHashAndPassword() function works by re-hashing the provided password using the same salt and cost parameter that is in the hash string that we’re comparing against. The re-hashed value is then checked against the original hash string using the subtle.ConstantTimeCompare() function, which performs a comparison in constant time (to mitigate the risk of a timing attack). If they don’t match, then it will return a bcrypt.ErrMismatchedHashAndPassword error.
-
-### Adding Validation Checks
-- Check that the Name field is not the empty string, and the value is less than 500 bytes long.
-- Check that the Email field is not the empty string, and that it matches the regular expression for email addresses that we added in our validator package earlier in the book.
-- If the Password.plaintext field is not nil, then check that the value is not the empty string and is between 8 and 72 bytes long.
-- Check that the Password.hash field is never nil.
-
-> When creating a bcrypt hash the input is truncated to a maximum of 72 bytes. So, if someone uses a very long password, it means that any bytes after that would effectively be ignored when creating the hash.
-
-### Creating the UserModel
-Or in my case, a repository
-
-```go
-// Define a custom ErrDuplicateEmail error.
-var (
-    ErrDuplicateEmail = errors.New("duplicate email")
-)
-
-...
-
-// Create a UserModel struct which wraps the connection pool.
-type UserModel struct {
-    DB *sql.DB
-}
-
-// Insert a new record in the database for the user. Note that the id, created_at and 
-// version fields are all automatically generated by our database, so we use the 
-// RETURNING clause to read them into the User struct after the insert, in the same way 
-// that we did when creating a movie.
-func (m UserModel) Insert(user *User) error {
-    query := `
-        INSERT INTO users (name, email, password_hash, activated) 
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, created_at, version`
-
-    args := []any{user.Name, user.Email, user.Password.hash, user.Activated}
-
-    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-    defer cancel()
-
-    // If the table already contains a record with this email address, then when we try 
-    // to perform the insert there will be a violation of the UNIQUE "users_email_key" 
-    // constraint that we set up in the previous chapter. We check for this error 
-    // specifically, and return custom ErrDuplicateEmail error instead.
-    err := m.DB.QueryRowContext(ctx, query, args...).Scan(&user.ID, &user.CreatedAt, &user.Version)
-    if err != nil {
-        switch {
-        case err.Error() == `pq: duplicate key value violates unique constraint "users_email_key"`:
-            return ErrDuplicateEmail
-        default:
-            return err
-        }
-    }
-
-    return nil
-}
-
-// Retrieve the User details from the database based on the user's email address.
-// Because we have a UNIQUE constraint on the email column, this SQL query will only 
-// return one record (or none at all, in which case we return a ErrRecordNotFound error).
-func (m UserModel) GetByEmail(email string) (*User, error) {
-    query := `
-        SELECT id, created_at, name, email, password_hash, activated, version
-        FROM users
-        WHERE email = $1`
-
-    var user User
-
-    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-    defer cancel()
-
-    err := m.DB.QueryRowContext(ctx, query, email).Scan(
-        &user.ID,
-        &user.CreatedAt,
-        &user.Name,
-        &user.Email,
-        &user.Password.hash,
-        &user.Activated,
-        &user.Version,
-    )
-
-    if err != nil {
-        switch {
-        case errors.Is(err, sql.ErrNoRows):
-            return nil, ErrRecordNotFound
-        default:
-            return nil, err
-        }
-    }
-
-    return &user, nil
-}
-
-// Update the details for a specific user. Notice that we check against the version 
-// field to help prevent any race conditions during the request cycle, just like we did
-// when updating a movie. And we also check for a violation of the "users_email_key" 
-// constraint when performing the update, just like we did when inserting the user 
-// record originally.
-func (m UserModel) Update(user *User) error {
-    query := `
-        UPDATE users 
-        SET name = $1, email = $2, password_hash = $3, activated = $4, version = version + 1
-        WHERE id = $5 AND version = $6
-        RETURNING version`
-
-    args := []any{
-        user.Name,
-        user.Email,
-        user.Password.hash,
-        user.Activated,
-        user.ID,
-        user.Version,
-    }
-
-    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-    defer cancel()
-
-    err := m.DB.QueryRowContext(ctx, query, args...).Scan(&user.Version)
-    if err != nil {
-        switch {
-        case err.Error() == `pq: duplicate key value violates unique constraint "users_email_key"`:
-            return ErrDuplicateEmail
-        case errors.Is(err, sql.ErrNoRows):
-            return ErrEditConflict
-        default:
-            return err
-        }
-    }
+    // At this point we know that the graceful shutdown completed successfully and we 
+    // log a "stopped server" message.
+    app.logger.Info("stopped server", "addr", srv.Addr)
 
     return nil
 }
 ```
 
-Also the main model
+At first glance this code might seem a bit complex, but at a high-level what it’s doing can be summarized very simply: when we receive a SIGINT or SIGTERM signal, we instruct our server to stop accepting any new HTTP requests, and give any in-flight requests a ‘grace period’ of 30 seconds to complete before the application is terminated.
+
+It’s important to be aware that the Shutdown() method does not wait for any background tasks to complete, nor does it close hijacked long-lived connections like WebSockets. Instead, you will need to implement your own logic to coordinate a graceful shutdown of these things.
+
+To help demonstrate the graceful shutdown functionality, you can add a 4 second sleep delay to the healthcheckHandler method
 ```go
-type Models struct {
-    Movies MovieModel
-    Users  UserModel // Add a new Users field.
-}
-
-func NewModels(db *sql.DB) Models {
-    return Models{
-        Movies: MovieModel{DB: db},
-        Users:  UserModel{DB: db}, // Initialize a new UserModel instance.
-    }
-}
-```
-
-## Registering a User
-Add a handler
-`POST	/v1/users 	registerUserHandler   Register a new user`
-
-When a client calls this new POST /v1/users endpoint, we will expect them to provide the following details for the new user in a JSON request body. Similar to this:
-
-```shell
-{
-    "name": "Alice Smith",
-    "email": "alice@example.com",
-    "password": "pa55word"
-}
-```
-
-When we receive this, the registerUserHandler should create a new User struct containing these details, validate it with the ValidateUser() helper, and then pass it to our UserModel.Insert() method to create a new database record.
-
-```go
-func (app *application) registerUserHandler(w http.ResponseWriter, r *http.Request) {
-    // Create an anonymous struct to hold the expected data from the request body.
-    var input struct {
-        Name     string `json:"name"`
-        Email    string `json:"email"`
-        Password string `json:"password"`
+func (app *application) healthcheckHandler(w http.ResponseWriter, r *http.Request) {
+    env := envelope{
+        "status": "available",
+        "system_info": map[string]string{
+            "environment": app.config.env,
+            "version":     version,
+        },
     }
 
-    // Parse the request body into the anonymous struct.
-    err := app.readJSON(w, r, &input)
-    if err != nil {
-        app.badRequestResponse(w, r, err)
-        return
-    }
+    // Add a 4 second delay.
+    time.Sleep(4 * time.Second)
 
-    // Copy the data from the request body into a new User struct. Notice also that we
-    // set the Activated field to false, which isn't strictly necessary because the 
-    // Activated field will have the zero-value of false by default. But setting this 
-    // explicitly helps to make our intentions clear to anyone reading the code.
-    user := &data.User{
-        Name:      input.Name,
-        Email:     input.Email,
-        Activated: false,
-    }
-
-    // Use the Password.Set() method to generate and store the hashed and plaintext 
-    // passwords.
-    err = user.Password.Set(input.Password)
-    if err != nil {
-        app.serverErrorResponse(w, r, err)
-        return
-    }
-
-    v := validator.New()
-
-    // Validate the user struct and return the error messages to the client if any of 
-    // the checks fail.
-    if data.ValidateUser(v, user); !v.Valid() {
-        app.failedValidationResponse(w, r, v.Errors)
-        return
-    }
-
-    // Insert the user data into the database.
-    err = app.models.Users.Insert(user)
-    if err != nil {
-        switch {
-        // If we get a ErrDuplicateEmail error, use the v.AddError() method to manually
-        // add a message to the validator instance, and then call our 
-        // failedValidationResponse() helper.
-        case errors.Is(err, data.ErrDuplicateEmail):
-            v.AddError("email", "a user with this email address already exists")
-            app.failedValidationResponse(w, r, v.Errors)
-        default:
-            app.serverErrorResponse(w, r, err)
-        }
-        return
-    }
-
-    // Write a JSON response containing the user data along with a 201 Created status 
-    // code.
-    err = app.writeJSON(w, http.StatusCreated, envelope{"user": user}, nil)
+    err := app.writeJSON(w, http.StatusOK, env, nil)
     if err != nil {
         app.serverErrorResponse(w, r, err)
     }
 }
 ```
 
-we also need to add it to our routes
-```go
-// Add the route for the POST /v1/users endpoint.
-    router.HandlerFunc(http.MethodPost, "/v1/users", app.registerUserHandler)
-```
-
-Example
+Then start the API, and in another terminal window issue a request to the healthcheck endpoint followed by a SIGTERM signal.
 ```shell
-$ BODY='{"name": "Alice Smith", "email": "alice@example.com", "password": "pa55word"}'
-$ curl -i -d "$BODY" localhost:4000/v1/users
-HTTP/1.1 201 Created
-Content-Type: application/json
-Date: Mon, 15 Mar 2021 14:42:58 GMT
-Content-Length: 152
-
-{
-    "user": {
-        "id": 1,
-        "created_at": "2021-03-15T15:42:58+01:00",
-        "name": "Alice Smith",
-        "email": "alice@example.com",
-        "activated": false
-    }
-}
+$ curl localhost:4000/v1/healthcheck & pkill -SIGTERM api
 ```
 
-Check the psql
+When shutting down, after a 4 second delay
 ```shell
-$ psql $GREENLIGHT_DB_DSN
-Password for user greenlight: 
-psql (15.4 (Ubuntu 15.4-1.pgdg22.04+1))
-SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, bits: 256, compression: off)
-Type "help" for help.
-
-greenlight=> SELECT * FROM users;
- id |       created_at       |    name     |       email       |           password_hash             | activated | version 
-----+------------------------+-------------+-------------------+-------------------------------------+-----------+---------
-  1 | 2021-04-11 14:29:45+02 | Alice Smith | alice@example.com | \x24326124313224526157784d67356d... | f         |       1
-(1 row)
+$ go run ./cmd/api
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
+time=2023-09-10T10:59:14.722+02:00 level=INFO msg="shutting down server" signal=terminated
+time=2023-09-10T10:59:18.722+02:00 level=INFO msg="stopped server" addr=:4000
 ```
 
-> The psql tool always displays bytea values as a hex-encoded string. So the password_hash field in the output above displays a hex-encoding of the bcrypt hash. 
 
-If you want, you can run the following query to append the regular string version to the table too: 
-```sql
-SELECT *, encode(password_hash, 'escape') FROM users;
-```
 
-Invalid requests:
-```shell
-$ BODY='{"name": "", "email": "bob@invalid.", "password": "pass"}'
-$ curl -d "$BODY" localhost:4000/v1/users
-{
-    "error": {
-        "email": "must be a valid email address",
-        "name": "must be provided",
-        "password": "must be at least 8 bytes long"
-    }
-}
-```
-
-```shell
-$ BODY='{"name": "Alice Jones", "email": "alice@example.com", "password": "pa55word"}'
-$ curl -i -d "$BODY" localhost:4000/v1/users
-HTTP/1.1 422 Unprocessable Entity
-Cache-Control: no-store
-Content-Type: application/json
-Date: Wed, 30 Dec 2020 14:22:06 GMT
-Content-Length: 78
-
-{
-    "error": {
-        "email": "a user with this email address already exists"
-    }
-}
-```
-
-### Email case-sensitivity
-- Thanks to the specifications in RFC 2821, the domain part of an email address (username@domain) is case-insensitive. This means we can be confident that the real-life user behind alice@example.com is the same person as alice@EXAMPLE.COM.
-
-- The username part of an email address may or may not be case-sensitive — it depends on the email provider. Almost every major email provider treats the username as case-insensitive, but it is not absolutely guaranteed. All we can say here is that the real-life user behind the address alice@example.com is very probably (but not definitely) the same as ALICE@example.com.
-
-From a security point of view, we should always store the email address using the exact casing provided by the user during registration, and we should send them emails using that exact casing only. If we don’t, there is a risk that emails could be delivered to the wrong real-life user.
-
-### User enumeration
-It’s important to be aware that our registration endpoint is vulnerable to user enumeration. For example, if an attacker wants to know whether alice@example.com has an account with us, all they need to do is send a request like this:
-
-```shell
-$ BODY='{"name": "Alice Jones", "email": "alice@example.com", "password": "pa55word"}'
-$ curl -d "$BODY" localhost:4000/v1/users
-{
-    "error": {
-        "email": "a user with this email address already exists"
-    }
-}
-```
-
-And they have the answer right there. We’re explicitly telling the attacker that alice@example.com is already a user.
-
-So, what are the risks of leaking this information?
-
-The first, most obvious, risk relates to user privacy. For services that are sensitive or confidential you probably don’t want to make it obvious who has an account. The second risk is that it makes it easier for an attacker to compromise a user’s account. Once they know a user’s email address, they can potentially:
-
-- Target the user with social engineering or another type of tailored attack.
-- Search for the email address in leaked password tables, and try those same passwords on our service.
-
-Preventing enumeration attacks typically requires two things:
-
-- Making sure that the response sent to the client is always exactly the same, irrespective of whether a user exists or not. Generally, this means changing your response wording to be ambiguous, and notifying the user of any problems in a side-channel (such as sending them an email to inform them that they already have an account).
-- Making sure that the time taken to send the response is always the same, irrespective of whether a user exists or not. In Go, this generally means offloading work to a background goroutine.
-
-Unfortunately, these mitigations tend to increase the complexity of your application and add friction and obscurity to your workflows. For all your regular users who are not attackers, they’re a negative from a UX point of view.
-
-It’s worth noting that many big-name services, including Twitter, GitHub and Amazon, don’t prevent user enumeration (at least not on their registration pages).

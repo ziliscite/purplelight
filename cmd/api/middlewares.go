@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"golang.org/x/time/rate"
+	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -100,6 +101,8 @@ func (app *application) rateLimit(next http.Handler) http.Handler {
 					delete(clients, ip)
 				}
 			}
+
+			log.Printf("%v", clients)
 
 			// Importantly, unlock the mutex when the cleanup is complete.
 			mu.Unlock()
