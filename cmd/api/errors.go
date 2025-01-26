@@ -78,7 +78,7 @@ func (app *application) rateLimitExceeded(w http.ResponseWriter, r *http.Request
 func (app *application) dbWriteError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, repository.ErrDuplicateEntry):
-		app.error(w, r, http.StatusConflict, "anime title already exists")
+		app.error(w, r, http.StatusConflict, "record already exists")
 	case errors.Is(err, repository.ErrDeadlockDetected) || errors.Is(err, repository.ErrEditConflict):
 		app.editConflict(w, r)
 	case errors.Is(err, repository.ErrTooManyRows) ||
