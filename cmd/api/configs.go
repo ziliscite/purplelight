@@ -2,6 +2,8 @@ package main
 
 import (
 	"flag"
+	"github.com/joho/godotenv"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -42,11 +44,10 @@ func GetConfig() Config {
 	once.Do(func() {
 		instance = Config{}
 
-		// turn off godotenv cuz I've configured the environment alr
-		//err := godotenv.Load()
-		//if err != nil {
-		//	log.Fatal("Error loading .env file")
-		//}
+		err := godotenv.Load()
+		if err != nil {
+			log.Fatal("Error loading .env file")
+		}
 
 		// Read the value of the port and env command-line flags into the config struct. We
 		// default to using the port number 4000 and the environment "development" if no
@@ -56,7 +57,7 @@ func GetConfig() Config {
 
 		// Read the DSN value from the db-dsn command-line flag into the config struct. We
 		// default to using our development DSN if no flag is provided.
-		flag.StringVar(&instance.db.dsn, "db-dsn", os.Getenv("PURPLELIGHT_DSN"), "PostgreSQL DSN")
+		flag.StringVar(&instance.db.dsn, "db-dsn", os.Getenv("PURPLELIGHT_DB_DSN"), "PostgreSQL DSN")
 
 		// Read the connection pool settings from command-line flags into the config struct.
 		// Notice that the default values we're using are the ones we discussed above?
