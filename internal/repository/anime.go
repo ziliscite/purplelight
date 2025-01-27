@@ -58,18 +58,21 @@ func (a AnimeRepository) InsertAnime(anime *data.Anime) error {
 		return ErrQueryPrepare
 	}
 
-	err = tx.QueryRow(ctx, animeStmt.SQL, anime.Title, anime.Type, anime.Episodes, anime.Status, anime.Season, anime.Year, anime.Duration).
+	args := []interface{}{anime.Title, anime.Type, anime.Episodes, anime.Status, anime.Season, anime.Year, anime.Duration}
+
+	err = tx.QueryRow(ctx, animeStmt.SQL, args...).
 		Scan(&anime.ID, &anime.CreatedAt, &anime.Version) // value passed through a pointer
 	if err != nil {
 		return a.logger.handleError(err)
 	}
 
-	// Get or insert new anime tags
+	// Get or insert new tags
 	tags, err := a.upsertTags(ctx, anime.Tags, tx)
 	if err != nil {
 		return a.logger.handleError(err)
 	}
 
+	// Insert new anime tags
 	err = a.insertAnimeTags(ctx, anime.ID, tags, tx)
 	if err != nil {
 		return a.logger.handleError(err)
@@ -106,8 +109,17 @@ func (a AnimeRepository) GetAnime(id int32) (*data.Anime, error) {
 		}
 	}()
 
-	animeStmt, err := tx.Prepare(ctx, "get anime", `
-		SELECT * FROM anime WHERE id = $1
+	animeStmt, err := tx.Prepare(ctx, "get anime", `		
+		SELECT
+			a.id, a.title, a.type, a.episodes,
+			a.status, a.season, a.year, a.duration,
+			ARRAY_AGG(t.name ORDER BY t.name) AS tags,
+			a.created_at, a.version
+		FROM anime a
+		JOIN anime_tags at ON a.id = at.anime_id
+		JOIN tag t ON at.tag_id = t.id
+		WHERE a.id = $1
+		GROUP BY a.id, a.title, a.type, a.episodes, a.status, a.season, a.year, a.duration, a.created_at, a.version;
 	`)
 	if err != nil {
 		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrQueryPrepare, err.Error()))
@@ -115,17 +127,10 @@ func (a AnimeRepository) GetAnime(id int32) (*data.Anime, error) {
 
 	var anime data.Anime
 	err = tx.QueryRow(ctx, animeStmt.SQL, id).
-		Scan(&anime.ID, &anime.Title, &anime.Type, &anime.Episodes, &anime.Status, &anime.Season, &anime.Year, &anime.Duration, &anime.CreatedAt, &anime.Version)
+		Scan(&anime.ID, &anime.Title, &anime.Type, &anime.Episodes, &anime.Status, &anime.Season, &anime.Year, &anime.Duration, &anime.Tags, &anime.CreatedAt, &anime.Version)
 	if err != nil {
 		return nil, a.logger.handleError(err)
 	}
-
-	tags, err := a.getAnimeTags(ctx, id, tx)
-	if err != nil {
-		return nil, a.logger.handleError(err)
-	}
-
-	anime.Tags = tags
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))

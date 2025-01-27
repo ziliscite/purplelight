@@ -3,19 +3,26 @@ package main
 import (
 	"context"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/ziliscite/purplelight/internal/mailer"
 	"github.com/ziliscite/purplelight/internal/repository"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 )
 
 const version = "1.0.0"
 
 // Add a models field to hold our new Models struct.
+// Include a sync.WaitGroup in the application struct. The zero-value for a
+// sync.WaitGroup type is a valid, useable, sync.WaitGroup with a 'counter' value of 0,
+// so we don't need to do anything else to initialize it before we can use it.
 type application struct {
 	config Config
 	logger *slog.Logger
+	mailer mailer.Mailer
 	repos  repository.Repositories
+	wg     sync.WaitGroup
 }
 
 func main() {
@@ -44,6 +51,7 @@ func main() {
 		config: cfg,
 		logger: logger,
 		repos:  repository.NewRepositories(db, logger),
+		mailer: mailer.New(cfg.smtp.host, cfg.smtp.port, cfg.smtp.username, cfg.smtp.password, cfg.smtp.sender),
 	}
 
 	// Call app.serve() to start the server.

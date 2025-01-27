@@ -1,348 +1,320 @@
-# Chapter 12. User Model Setup and Registration
-In the upcoming sections of this book, we’re going to shift our focus towards users: registering them, activating them, authenticating them, and restricting access to our API endpoints depending on the permissions that they have.
+# Chapter 13. Sending Emails
 
-But before we can do these things, we need to lay some groundwork. Specifically we need to:
+In this section of the book we’re going to inject some interactivity into our API, and adapt our registerUserHandler so that it sends the user a welcome email after they successfully register.
 
-- Create a new users table in PostgreSQL for storing our user data.
-- Create a UserModel which contains the code for interacting with our users table, validating user data, and hashing user passwords.
-- Develop a POST /v1/users endpoint which can be used to register new users in our application.
+- How to use the Mailtrap SMTP service to send and monitor test emails during development.
+- How to use the html/template package and Go’s embedded files functionality to create dynamic and easy-to-manage templates for your email content.
+- How to create a reusable internal/mailer package for sending emails from your application.
+- How to implement a pattern for sending emails in background goroutines, and how to wait for these to complete during a graceful shutdown.
 
-## Setting up the Users Database Table
-Let’s begin by creating a new users table in our database.
+## SMTP Server Setup
+In order to develop our email sending functionality, we’ll need access to a SMTP (Simple Mail Transfer Protocol) server that we can safely use for testing purposes.
+
+There are a huge number of SMTP service providers (such as Postmark, Sendgrid or Amazon SES) that we could use to send our emails — or you can even install and run your own SMTP server. But in this book we’re going to use Mailtrap.
+
+### Setting up Mailtrap
+Once you’re registered and logged in, use the menu to navigate to Testing › Inboxes. You should see a page listing your available inboxes.
+![img.png](img.png)
+
+Every Mailtrap account comes with one free inbox, which by default is called Demo inbox. You can change the name if you want by clicking the pencil icon under Actions.
+
+If you go ahead and click through to that inbox, you should see that it’s currently empty and contains no emails
+
+Each inbox also has its own set of SMTP credentials.
+![img_1.png](img_1.png)
+
+Basically, any emails that you send using these SMTP credentials will end up in this inbox, instead of being sent to the actual recipient.
+
+## Creating Email Templates
+To start with, we’ll keep the content of the welcome email really simple, with a short message to let the user know that their registration was successful and confirmation of their ID number.
+
+```markdown
+Hi,
+
+Thanks for signing up for a Greenlight account. We're excited to have you on board!
+
+For future reference, your user ID number is 123.
+
+Thanks,
+
+The Greenlight Team
+```
+
+Begin by creating a new internal/mailer/templates and then add a user_welcome.tmpl
+
+Inside this file we’re going to define three named templates to use as part of our welcome email:
+
+- A "subject" template containing the subject line for the email.
+- A "plainBody" template containing the plain-text variant of the email message body.
+- A "htmlBody" template containing the HTML variant of the email message body.
+
+```templ
+{{define "subject"}}Welcome to Purplelight!{{end}}
+
+{{define "plainBody"}}
+Hi,
+
+Thanks for signing up for a Purplelight account. We're excited to have you on board!
+
+For future reference, your user ID number is {{.ID}}.
+
+Thanks,
+
+The Purplelight Team
+{{end}}
+
+{{define "htmlBody"}}
+<!doctype html>
+<html>
+
+<head>
+    <meta name="viewport" content="width=device-width" />
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+</head>
+
+<body>
+    <p>Hi,</p>
+    <p>Thanks for signing up for a Purplelight account. We're excited to have you on board!</p>
+    <p>For future reference, your user ID number is {{.ID}}.</p>
+    <p>Thanks,</p>
+    <p>The Purplelight Team</p>
+</body>
+
+</html>
+{{end}} 
+```
+
+- We’ve defined the three named templates using the {{define "..."}}...{{end}} tags.
+- You can render dynamic data in these templates via the . character (referred to as dot). In the next chapter we’ll pass a User struct to the templates as dynamic data, which means that we can then render the user’s ID using the tag {{.ID}} in the templates.
+
+## Sending a Welcome Email
+To send emails we could use Go’s net/smtp package from the standard library. But unfortunately it’s been frozen for a few years, and doesn’t support some of the features that you might need in more advanced use-cases, such as the ability to add attachments.
+
+So instead, we using the third-party go-mail/mail package to help send email.
+
 ```shell
-$ migrate create -seq -ext sql -dir ./migrations create_users_table
-C:\Users\manzi\GolandProjects\purplelight\migrations\000003_create_users_table.up.sql
-C:\Users\manzi\GolandProjects\purplelight\migrations\000003_create_users_table.down.sql
+go get github.com/go-mail/mail/v2@v2
 ```
 
-Up
-```sql
-CREATE TABLE IF NOT EXISTS users (
-    id bigserial PRIMARY KEY,
-    created_at timestamp(0) with time zone NOT NULL DEFAULT NOW(),
-    name text NOT NULL,
-    email citext UNIQUE NOT NULL,
-    password_hash bytea NOT NULL,
-    activated bool NOT NULL,
-    version integer NOT NULL DEFAULT 1
-);
-```
-
-Down
-```sql
-DROP TABLE IF EXISTS users;
-```
-
-There are a few interesting about this CREATE TABLE statement:  
-- The email column has the type citext (case-insensitive text). This type stores text data exactly as it is inputted — without changing the case in any way — but comparisons against the data are always case-insensitive… including lookups on associated indexes.
-- We’ve also got a UNIQUE constraint on the email column. Combined with the citext type, this means that no two rows in the database can have the same email value — even if they have different cases. This essentially enforces a database-level business rule that `no two users should exist with the same email` address.
-- The password_hash column has the type bytea (binary string). In this column we’ll store a one-way hash of the user’s password generated using bcrypt — not the plaintext password itself.
-- The activated column stores a boolean value to denote whether a user account is ‘active’ or not. We will set this to false by default when creating a new user, and require the user to confirm their email address before we set it to true.
-- We’ve also included a version number column, which we will increment each time a user record is updated. This will allow us to use optimistic locking to prevent race conditions when updating user records, in the same way that we did with movies earlier in the book.
-
-Execute the migration using the following command:
-```shell
-migrate -path ./migrations -database %PURPLELIGHT_DSN% up
-```
-
-One important thing to point out here: the UNIQUE constraint on our email column has automatically been assigned the name users_email_key.
-
-## Setting up the Users Model
-We are going to update our internal/data package to contain a new User struct (to represent the data for an individual user), and create a UserModel type (which we will use to perform various SQL queries against our users table).
-
-Start by defining the User struct, along with some helper methods for setting and verifying the password for a user.
-
-The first thing we need to do is install the golang.org/x/crypto/bcrypt package
-```shell
-go get golang.org/x/crypto/bcrypt@latest
-```
-
-In the internal/data/users.go file
+### Creating an email helper
+Begin by creating a new internal/mailer/mailer.go
 ```go
-// Define a User struct to represent an individual user. Importantly, notice how we are 
-// using the json:"-" struct tag to prevent the Password and Version fields appearing in
-// any output when we encode it to JSON. Also notice that the Password field uses the
-// custom password type defined below.
-type User struct {
-    ID        int64     `json:"id"`
-    CreatedAt time.Time `json:"created_at"`
-    Name      string    `json:"name"`
-    Email     string    `json:"email"`
-    Password  password  `json:"-"`
-    Activated bool      `json:"activated"`
-    Version   int       `json:"-"`
+// Below we declare a new variable with the type embed.FS (embedded file system) to hold 
+// our email templates. This has a comment directive in the format `//go:embed <path>`
+// IMMEDIATELY ABOVE it, which indicates to Go that we want to store the contents of the
+// ./templates directory in the templateFS embedded file system variable.
+// ↓↓↓
+
+//go:embed "templates"
+var templateFS embed.FS
+
+// Define a Mailer struct which contains a mail.Dialer instance (used to connect to a
+// SMTP server) and the sender information for your emails (the name and address you
+// want the email to be from, such as "Alice Smith <alice@example.com>").
+type Mailer struct {
+    dialer *mail.Dialer
+    sender string
 }
 
-// Create a custom password type which is a struct containing the plaintext and hashed 
-// versions of the password for a user. The plaintext field is a *pointer* to a string,
-// so that we're able to distinguish between a plaintext password not being present in 
-// the struct at all, versus a plaintext password which is the empty string "".
-type password struct {
-    plaintext *string
-    hash      []byte
+func New(host string, port int, username, password, sender string) Mailer {
+    // Initialize a new mail.Dialer instance with the given SMTP server settings. We 
+    // also configure this to use a 5-second timeout whenever we send an email.
+    dialer := mail.NewDialer(host, port, username, password)
+    dialer.Timeout = 5 * time.Second
+
+    // Return a Mailer instance containing the dialer and sender information.
+    return Mailer{
+        dialer: dialer,
+        sender: sender,
+    }
 }
 
-// The Set() method calculates the bcrypt hash of a plaintext password, and stores both 
-// the hash and the plaintext versions in the struct.
-func (p *password) Set(plaintextPassword string) error {
-    hash, err := bcrypt.GenerateFromPassword([]byte(plaintextPassword), 12)
+// Define a Send() method on the Mailer type. This takes the recipient email address
+// as the first parameter, the name of the file containing the templates, and any
+// dynamic data for the templates as an any parameter.
+func (m Mailer) Send(recipient, templateFile string, data any) error {
+    // Use the ParseFS() method to parse the required template file from the embedded 
+    // file system.
+    tmpl, err := template.New("email").ParseFS(templateFS, "templates/"+templateFile)
     if err != nil {
         return err
     }
 
-    p.plaintext = &plaintextPassword
-    p.hash = hash
+    // Execute the named template "subject", passing in the dynamic data and storing the
+    // result in a bytes.Buffer variable.
+    subject := new(bytes.Buffer)
+    err = tmpl.ExecuteTemplate(subject, "subject", data)
+    if err != nil {
+        return err
+    }
+
+    // Follow the same pattern to execute the "plainBody" template and store the result
+    // in the plainBody variable.
+    plainBody := new(bytes.Buffer)
+    err = tmpl.ExecuteTemplate(plainBody, "plainBody", data)
+    if err != nil {
+        return err
+    }
+
+    // And likewise with the "htmlBody" template.
+    htmlBody := new(bytes.Buffer)
+    err = tmpl.ExecuteTemplate(htmlBody, "htmlBody", data)
+    if err != nil {
+        return err
+    }
+
+    // Use the mail.NewMessage() function to initialize a new mail.Message instance. 
+    // Then we use the SetHeader() method to set the email recipient, sender and subject
+    // headers, the SetBody() method to set the plain-text body, and the AddAlternative()
+    // method to set the HTML body. It's important to note that AddAlternative() should
+    // always be called *after* SetBody().
+    msg := mail.NewMessage()
+    msg.SetHeader("To", recipient)
+    msg.SetHeader("From", m.sender)
+    msg.SetHeader("Subject", subject.String())
+    msg.SetBody("text/plain", plainBody.String())
+    msg.AddAlternative("text/html", htmlBody.String())
+
+    // Call the DialAndSend() method on the dialer, passing in the message to send. This
+    // opens a connection to the SMTP server, sends the message, then closes the
+    // connection. If there is a timeout, it will return a "dial tcp: i/o timeout"
+    // error.
+    err = m.dialer.DialAndSend(msg)
+    if err != nil {
+        return err
+    }
 
     return nil
 }
-
-// The Matches() method checks whether the provided plaintext password matches the 
-// hashed password stored in the struct, returning true if it matches and false 
-// otherwise.
-func (p *password) Matches(plaintextPassword string) (bool, error) {
-    err := bcrypt.CompareHashAndPassword(p.hash, []byte(plaintextPassword))
-    if err != nil {
-        switch {
-        case errors.Is(err, bcrypt.ErrMismatchedHashAndPassword):
-            return false, nil
-        default:
-            return false, err
-        }
-    }
-
-    return true, nil
-}
 ```
 
-- The bcrypt.GenerateFromPassword() function generates a bcrypt hash of a password using a specific cost parameter (in the code above, we use a cost of 12). The higher the cost, the slower and more computationally expensive it is to generate the hash. There is a balance to be struck here — we want the cost to be prohibitively expensive for attackers, but also not so slow that it harms the user experience of our API. This function returns a hash string in the format:  
-`$2b$[cost]$[22-character salt][31-character hash]`
+### Using embedded file systems
+Take a quick moment to discuss embedded file systems in more detail
 
-- The bcrypt.CompareHashAndPassword() function works by re-hashing the provided password using the same salt and cost parameter that is in the hash string that we’re comparing against. The re-hashed value is then checked against the original hash string using the subtle.ConstantTimeCompare() function, which performs a comparison in constant time (to mitigate the risk of a timing attack). If they don’t match, then it will return a bcrypt.ErrMismatchedHashAndPassword error.
+- You can only use the //go:embed directive on global variables at package level, not within functions or methods. If you try to use it in a function or method, you’ll get the error "go:embed cannot apply to var inside func" at compile time.
 
-### Adding Validation Checks
-- Check that the Name field is not the empty string, and the value is less than 500 bytes long.
-- Check that the Email field is not the empty string, and that it matches the regular expression for email addresses that we added in our validator package earlier in the book.
-- If the Password.plaintext field is not nil, then check that the value is not the empty string and is between 8 and 72 bytes long.
-- Check that the Password.hash field is never nil.
+- When you use the directive //go:embed "<path>" to create an embedded file system, the path should be relative to the source code file containing the directive. So in our case, //go:embed "templates" embeds the contents of the directory at internal/mailer/templates.
 
-> When creating a bcrypt hash the input is truncated to a maximum of 72 bytes. So, if someone uses a very long password, it means that any bytes after that would effectively be ignored when creating the hash.
+- The embedded file system is rooted in the directory which contains the //go:embed directive. So, in our case, to get the user_welcome.tmpl file we need to retrieve it from templates/user_welcome.tmpl in the embedded file system.
 
-### Creating the UserModel
-Or in my case, a repository
+- Paths cannot contain . or .. elements, nor may they begin or end with a /. This essentially restricts you to only embedding files that are contained in the same directory (or a subdirectory) as the source code which has the //go:embed directive.
 
+- If the path is for a directory, then all files in the directory are recursively embedded, except for files with names that begin with . or _. If you want to include these files you should use the * wildcard character in the path, like //go:embed "templates/*"
+
+- You can specify multiple directories and files in one directive. For example: //go:embed "images" "styles/css" "favicon.ico".
+
+- The path separator should always be a forward slash, even on Windows machines.
+
+### Using our mail helper
+We need to do two things:
+
+- Adapt our code to accept the configuration settings for the SMTP server as command-line flags.
+- Initialize a new Mailer instance and make it available to our handlers via the application struct.
+
+Make sure to use your own Mailtrap SMTP server settings from the previous chapter as the default values for the command line flags here.
 ```go
-// Define a custom ErrDuplicateEmail error.
-var (
-    ErrDuplicateEmail = errors.New("duplicate email")
-)
-
-...
-
-// Create a UserModel struct which wraps the connection pool.
-type UserModel struct {
-    DB *sql.DB
+// Update the config struct to hold the SMTP server settings.
+type config struct {
+    port int
+    env  string
+    db   struct {
+        dsn          string
+        maxOpenConns int
+        maxIdleConns int
+        maxIdleTime  time.Duration
+    }
+    limiter struct {
+        enabled bool
+        rps     float64
+        burst   int
+    }
+    smtp struct {
+        host     string
+        port     int
+        username string
+        password string
+        sender   string
+    }
 }
 
-// Insert a new record in the database for the user. Note that the id, created_at and 
-// version fields are all automatically generated by our database, so we use the 
-// RETURNING clause to read them into the User struct after the insert, in the same way 
-// that we did when creating a movie.
-func (m UserModel) Insert(user *User) error {
-    query := `
-        INSERT INTO users (name, email, password_hash, activated) 
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, created_at, version`
+// Update the application struct to hold a new Mailer instance.
+type application struct {
+    config config
+    logger *slog.Logger
+    models data.Models
+    mailer mailer.Mailer
+}
 
-    args := []any{user.Name, user.Email, user.Password.hash, user.Activated}
+func main() {
+    var cfg config
 
-    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-    defer cancel()
+    flag.IntVar(&cfg.port, "port", 4000, "API server port")
+    flag.StringVar(&cfg.env, "env", "development", "Environment (development|staging|production)")
 
-    // If the table already contains a record with this email address, then when we try 
-    // to perform the insert there will be a violation of the UNIQUE "users_email_key" 
-    // constraint that we set up in the previous chapter. We check for this error 
-    // specifically, and return custom ErrDuplicateEmail error instead.
-    err := m.DB.QueryRowContext(ctx, query, args...).Scan(&user.ID, &user.CreatedAt, &user.Version)
+    flag.StringVar(&cfg.db.dsn, "db-dsn", os.Getenv("GREENLIGHT_DB_DSN"), "PostgreSQL DSN")
+
+    flag.IntVar(&cfg.db.maxOpenConns, "db-max-open-conns", 25, "PostgreSQL max open connections")
+    flag.IntVar(&cfg.db.maxIdleConns, "db-max-idle-conns", 25, "PostgreSQL max idle connections")
+    flag.DurationVar(&cfg.db.maxIdleTime, "db-max-idle-time", 15*time.Minute, "PostgreSQL max connection idle time")
+
+    flag.BoolVar(&cfg.limiter.enabled, "limiter-enabled", true, "Enable rate limiter")
+    flag.Float64Var(&cfg.limiter.rps, "limiter-rps", 2, "Rate limiter maximum requests per second")
+    flag.IntVar(&cfg.limiter.burst, "limiter-burst", 4, "Rate limiter maximum burst")
+
+    // Read the SMTP server configuration settings into the config struct, using the
+    // Mailtrap settings as the default values. IMPORTANT: If you're following along,
+    // make sure to replace the default values for smtp-username and smtp-password
+    // with your own Mailtrap credentials.
+    flag.StringVar(&cfg.smtp.host, "smtp-host", "sandbox.smtp.mailtrap.io", "SMTP host")
+    flag.IntVar(&cfg.smtp.port, "smtp-port", 25, "SMTP port")
+    flag.StringVar(&cfg.smtp.username, "smtp-username", "a7420fc0883489", "SMTP username")
+    flag.StringVar(&cfg.smtp.password, "smtp-password", "e75ffd0a3aa5ec", "SMTP password")
+    flag.StringVar(&cfg.smtp.sender, "smtp-sender", "Greenlight <no-reply@greenlight.alexedwards.net>", "SMTP sender")
+
+    flag.Parse()
+
+    logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+    db, err := openDB(cfg)
     if err != nil {
-        switch {
-        case err.Error() == `pq: duplicate key value violates unique constraint "users_email_key"`:
-            return ErrDuplicateEmail
-        default:
-            return err
-        }
+        logger.Error(err.Error())
+        os.Exit(1)
+    }
+    defer db.Close()
+
+    logger.Info("database connection pool established")
+
+    // Initialize a new Mailer instance using the settings from the command line
+    // flags, and add it to the application struct.
+    app := &application{
+        config: cfg,
+        logger: logger,
+        models: data.NewModels(db),
+        mailer: mailer.New(cfg.smtp.host, cfg.smtp.port, cfg.smtp.username, cfg.smtp.password, cfg.smtp.sender),
     }
 
-    return nil
-}
-
-// Retrieve the User details from the database based on the user's email address.
-// Because we have a UNIQUE constraint on the email column, this SQL query will only 
-// return one record (or none at all, in which case we return a ErrRecordNotFound error).
-func (m UserModel) GetByEmail(email string) (*User, error) {
-    query := `
-        SELECT id, created_at, name, email, password_hash, activated, version
-        FROM users
-        WHERE email = $1`
-
-    var user User
-
-    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-    defer cancel()
-
-    err := m.DB.QueryRowContext(ctx, query, email).Scan(
-        &user.ID,
-        &user.CreatedAt,
-        &user.Name,
-        &user.Email,
-        &user.Password.hash,
-        &user.Activated,
-        &user.Version,
-    )
-
+    err = app.serve()
     if err != nil {
-        switch {
-        case errors.Is(err, sql.ErrNoRows):
-            return nil, ErrRecordNotFound
-        default:
-            return nil, err
-        }
-    }
-
-    return &user, nil
-}
-
-// Update the details for a specific user. Notice that we check against the version 
-// field to help prevent any race conditions during the request cycle, just like we did
-// when updating a movie. And we also check for a violation of the "users_email_key" 
-// constraint when performing the update, just like we did when inserting the user 
-// record originally.
-func (m UserModel) Update(user *User) error {
-    query := `
-        UPDATE users 
-        SET name = $1, email = $2, password_hash = $3, activated = $4, version = version + 1
-        WHERE id = $5 AND version = $6
-        RETURNING version`
-
-    args := []any{
-        user.Name,
-        user.Email,
-        user.Password.hash,
-        user.Activated,
-        user.ID,
-        user.Version,
-    }
-
-    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-    defer cancel()
-
-    err := m.DB.QueryRowContext(ctx, query, args...).Scan(&user.Version)
-    if err != nil {
-        switch {
-        case err.Error() == `pq: duplicate key value violates unique constraint "users_email_key"`:
-            return ErrDuplicateEmail
-        case errors.Is(err, sql.ErrNoRows):
-            return ErrEditConflict
-        default:
-            return err
-        }
-    }
-
-    return nil
-}
-```
-
-Also the main model
-```go
-type Models struct {
-    Movies MovieModel
-    Users  UserModel // Add a new Users field.
-}
-
-func NewModels(db *sql.DB) Models {
-    return Models{
-        Movies: MovieModel{DB: db},
-        Users:  UserModel{DB: db}, // Initialize a new UserModel instance.
+        logger.Error(err.Error())
+        os.Exit(1)
     }
 }
 ```
 
-## Registering a User
-Add a handler
-`POST	/v1/users 	registerUserHandler   Register a new user`
-
-When a client calls this new POST /v1/users endpoint, we will expect them to provide the following details for the new user in a JSON request body. Similar to this:
-
-```shell
-{
-    "name": "Alice Smith",
-    "email": "alice@example.com",
-    "password": "pa55word"
-}
-```
-
-When we receive this, the registerUserHandler should create a new User struct containing these details, validate it with the ValidateUser() helper, and then pass it to our UserModel.Insert() method to create a new database record.
-
+And then the final thing we need to do is update our registerUserHandler to actually send the email, which we can do like so:
 ```go
 func (app *application) registerUserHandler(w http.ResponseWriter, r *http.Request) {
-    // Create an anonymous struct to hold the expected data from the request body.
-    var input struct {
-        Name     string `json:"name"`
-        Email    string `json:"email"`
-        Password string `json:"password"`
-    }
+    
+    ... // Nothing above here needs to change.
 
-    // Parse the request body into the anonymous struct.
-    err := app.readJSON(w, r, &input)
-    if err != nil {
-        app.badRequestResponse(w, r, err)
-        return
-    }
-
-    // Copy the data from the request body into a new User struct. Notice also that we
-    // set the Activated field to false, which isn't strictly necessary because the 
-    // Activated field will have the zero-value of false by default. But setting this 
-    // explicitly helps to make our intentions clear to anyone reading the code.
-    user := &data.User{
-        Name:      input.Name,
-        Email:     input.Email,
-        Activated: false,
-    }
-
-    // Use the Password.Set() method to generate and store the hashed and plaintext 
-    // passwords.
-    err = user.Password.Set(input.Password)
+    // Call the Send() method on our Mailer, passing in the user's email address,
+    // name of the template file, and the User struct containing the new user's data.
+    err = app.mailer.Send(user.Email, "user_welcome.tmpl", user)
     if err != nil {
         app.serverErrorResponse(w, r, err)
         return
     }
 
-    v := validator.New()
-
-    // Validate the user struct and return the error messages to the client if any of 
-    // the checks fail.
-    if data.ValidateUser(v, user); !v.Valid() {
-        app.failedValidationResponse(w, r, v.Errors)
-        return
-    }
-
-    // Insert the user data into the database.
-    err = app.models.Users.Insert(user)
-    if err != nil {
-        switch {
-        // If we get a ErrDuplicateEmail error, use the v.AddError() method to manually
-        // add a message to the validator instance, and then call our 
-        // failedValidationResponse() helper.
-        case errors.Is(err, data.ErrDuplicateEmail):
-            v.AddError("email", "a user with this email address already exists")
-            app.failedValidationResponse(w, r, v.Errors)
-        default:
-            app.serverErrorResponse(w, r, err)
-        }
-        return
-    }
-
-    // Write a JSON response containing the user data along with a 201 Created status 
-    // code.
     err = app.writeJSON(w, http.StatusCreated, envelope{"user": user}, nil)
     if err != nil {
         app.serverErrorResponse(w, r, err)
@@ -350,117 +322,353 @@ func (app *application) registerUserHandler(w http.ResponseWriter, r *http.Reque
 }
 ```
 
-we also need to add it to our routes
-```go
-// Add the route for the POST /v1/users endpoint.
-    router.HandlerFunc(http.MethodPost, "/v1/users", app.registerUserHandler)
-```
-
-Example
+Try curl
 ```shell
-$ BODY='{"name": "Alice Smith", "email": "alice@example.com", "password": "pa55word"}'
-$ curl -i -d "$BODY" localhost:4000/v1/users
-HTTP/1.1 201 Created
-Content-Type: application/json
-Date: Mon, 15 Mar 2021 14:42:58 GMT
-Content-Length: 152
-
+$ BODY='{"name": "Bob Jones", "email": "bob@example.com", "password": "pa55word"}'
+$ curl -w '\nTime: %{time_total}\n' -d "$BODY" localhost:4000/v1/users
 {
     "user": {
-        "id": 1,
-        "created_at": "2021-03-15T15:42:58+01:00",
-        "name": "Alice Smith",
-        "email": "alice@example.com",
+        "id": 3,
+        "created_at": "2021-04-11T20:26:22+02:00",
+        "name": "Bob Jones",
+        "email": "bob@example.com",
         "activated": false
     }
 }
+
+Time: 2.331957
 ```
 
-Check the psql
-```shell
-$ psql $GREENLIGHT_DB_DSN
-Password for user greenlight: 
-psql (15.4 (Ubuntu 15.4-1.pgdg22.04+1))
-SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, bits: 256, compression: off)
-Type "help" for help.
+> If you receive a "dial tcp: connect: connection refused" error this means that your application could not connect to the Mailtrap SMTP server. Please double check that your Mailtrap credentials are correct, or try using port 2525 instead of port 25.
 
-greenlight=> SELECT * FROM users;
- id |       created_at       |    name     |       email       |           password_hash             | activated | version 
-----+------------------------+-------------+-------------------+-------------------------------------+-----------+---------
-  1 | 2021-04-11 14:29:45+02 | Alice Smith | alice@example.com | \x24326124313224526157784d67356d... | f         |       1
-(1 row)
+### Checking the email in Mailtrap
+If you’ve been following along and are using the Mailtrap SMTP server credentials, when you go back to your account you should see now the welcome email.
+![img_2.png](img_2.png)
+
+### Retrying email send attempts
+```go
+func (m Mailer) Send(recipient, templateFile string, data any) error {
+    ...
+
+    // Try sending the email up to three times before aborting and returning the final 
+    // error. We sleep for 500 milliseconds between each attempt.
+    for i := 1; i <= 3; i++ {
+        err = m.dialer.DialAndSend(msg)
+        // If everything worked, return nil.
+        if nil == err {
+            return nil
+        }
+
+        // If it didn't work, sleep for a short time and retry.
+        time.Sleep(500 * time.Millisecond)
+    }
+
+    return err
+}
 ```
 
-> The psql tool always displays bytea values as a hex-encoded string. So the password_hash field in the output above displays a hex-encoding of the bcrypt hash. 
+This retry functionality is a relatively simple addition to our code, but it helps to increase the probability that emails are successfully sent in the event of transient network issues.
 
-If you want, you can run the following query to append the regular string version to the table too: 
-```sql
-SELECT *, encode(password_hash, 'escape') FROM users;
-```
+## Sending Background Emails
+Sending the welcome email from the registerUserHandler method adds quite a lot of latency to the total request/response round-trip for the client.
 
-Invalid requests:
-```shell
-$ BODY='{"name": "", "email": "bob@invalid.", "password": "pass"}'
-$ curl -d "$BODY" localhost:4000/v1/users
-{
-    "error": {
-        "email": "must be a valid email address",
-        "name": "must be provided",
-        "password": "must be at least 8 bytes long"
+One way we could reduce this latency is by sending the email in a background goroutine.
+```go
+func (app *application) registerUserHandler(w http.ResponseWriter, r *http.Request) {
+
+    ...
+
+    // Launch a goroutine which runs an anonymous function that sends the welcome email.
+    go func() {
+        err = app.mailer.Send(user.Email, "user_welcome.tmpl", user)
+        if err != nil {
+            // Importantly, if there is an error sending the email then we use the 
+            // app.logger.Error() helper to manage it, instead of the 
+            // app.serverErrorResponse() helper like before.
+            app.logger.Error(err.Error())
+        }
+    }()
+
+    // Note that we also change this to send the client a 202 Accepted status code.
+    // This status code indicates that the request has been accepted for processing, but 
+    // the processing has not been completed.
+    err = app.writeJSON(w, http.StatusAccepted, envelope{"user": user}, nil)
+    if err != nil {
+        app.serverErrorResponse(w, r, err)
     }
 }
 ```
 
-```shell
-$ BODY='{"name": "Alice Jones", "email": "alice@example.com", "password": "pa55word"}'
-$ curl -i -d "$BODY" localhost:4000/v1/users
-HTTP/1.1 422 Unprocessable Entity
-Cache-Control: no-store
-Content-Type: application/json
-Date: Wed, 30 Dec 2020 14:22:06 GMT
-Content-Length: 78
+When this code is executed now, a new ‘background’ goroutine will be launched for sending the welcome email. The code in this background goroutine will be executed concurrently with the subsequent code in our registerUserHandler, which means we are no longer waiting for the email to be sent before we return a JSON response to the client.
 
+- We use the app.logger.Error() method to manage any errors in our background goroutine. This is because by the time we encounter the errors, the client will probably have already been sent a 202 Accepted response by our writeJSON() helper.
+
+- Note that we don’t want to use the app.serverErrorResponse() helper to handle any errors in our background goroutine, as that would result in us trying to write a second HTTP response and getting a "http: superfluous response.WriteHeader call" error from our http.Server at runtime.
+
+- The code running in the background goroutine forms a closure over the user and app variables. It’s important to be aware that these ‘closed over’ variables are not scoped to the background goroutine, which means that any changes you make to them will be reflected in the rest of your codebase. For a simple example of this, see the following playground code.
+
+- In our case we aren’t changing the value of these variables in any way, so this behavior won’t cause us any issues. But it is important to keep in mind.
+
+```shell
+$ BODY='{"name": "Carol Smith", "email": "carol@example.com", "password": "pa55word"}'
+$ curl -w '\nTime: %{time_total}\n' -d "$BODY" localhost:4000/v1/users
 {
-    "error": {
-        "email": "a user with this email address already exists"
+    "user": {
+        "id": 4,
+        "created_at": "2021-04-11T21:21:12+02:00",
+        "name": "Carol Smith",
+        "email": "carol@example.com",
+        "activated": false
+    }
+}
+
+Time: 0.268639
+```
+
+This time, you should see that the time taken to return the response is much faster — in his case 0.27 seconds compared to the previous 2.33 seconds.
+
+### Recovering panics
+It’s important to bear in mind that any panic which happens in this background goroutine will `not` be automatically recovered by our recoverPanic() middleware or Go’s http.Server, and will cause our whole application to terminate.
+
+The code involved in sending an email is quite complex (including calls to a third-party package) and the risk of a runtime panic is non-negligible.
+
+We need to make sure that any panic in this background goroutine is manually recovered, using a similar pattern to the one in our recoverPanic() middleware.
+```go
+func (app *application) registerUserHandler(w http.ResponseWriter, r *http.Request) {
+
+    ...
+
+    // Launch a background goroutine to send the welcome email.
+    go func() {
+        // Run a deferred function which uses recover() to catch any panic, and log an
+        // error message instead of terminating the application.
+        defer func() {
+            if err := recover(); err != nil {
+                app.logger.Error(fmt.Sprintf("%v", err))
+            }
+        }()
+
+        // Send the welcome email.
+        err = app.mailer.Send(user.Email, "user_welcome.tmpl", user)
+        if err != nil {
+            app.logger.Error(err.Error())
+        }
+    }()
+
+    err = app.writeJSON(w, http.StatusAccepted, envelope{"user": user}, nil)
+    if err != nil {
+        app.serverErrorResponse(w, r, err)
     }
 }
 ```
 
-### Email case-sensitivity
-- Thanks to the specifications in RFC 2821, the domain part of an email address (username@domain) is case-insensitive. This means we can be confident that the real-life user behind alice@example.com is the same person as alice@EXAMPLE.COM.
+### Using a helper function
+If you need to execute a lot of background tasks in your application, it can get tedious to keep repeating the same panic recovery code — and there’s a risk that you might forget to include it altogether.
 
-- The username part of an email address may or may not be case-sensitive — it depends on the email provider. Almost every major email provider treats the username as case-insensitive, but it is not absolutely guaranteed. All we can say here is that the real-life user behind the address alice@example.com is very probably (but not definitely) the same as ALICE@example.com.
+To help take care of this, it’s possible to create a simple helper function which wraps the panic recovery logic.
 
-From a security point of view, we should always store the email address using the exact casing provided by the user during registration, and we should send them emails using that exact casing only. If we don’t, there is a risk that emails could be delivered to the wrong real-life user.
+cmd/api/helpers.go
+```go
+// The background() helper accepts an arbitrary function as a parameter.
+func (app *application) background(fn func()) {
+    // Launch a background goroutine.
+    go func() {
+        // Recover any panic.
+        defer func() {
+            if err := recover(); err != nil {
+                app.logger.Error(fmt.Sprintf("%v", err))
+            }
+        }()
 
-### User enumeration
-It’s important to be aware that our registration endpoint is vulnerable to user enumeration. For example, if an attacker wants to know whether alice@example.com has an account with us, all they need to do is send a request like this:
+        // Execute the arbitrary function that we passed as the parameter.
+        fn()
+    }()
+}
+```
 
-```shell
-$ BODY='{"name": "Alice Jones", "email": "alice@example.com", "password": "pa55word"}'
-$ curl -d "$BODY" localhost:4000/v1/users
-{
-    "error": {
-        "email": "a user with this email address already exists"
+cmd/api/users.go
+```go
+func (app *application) registerUserHandler(w http.ResponseWriter, r *http.Request) {
+
+    ...
+  
+    // Use the background helper to execute an anonymous function that sends the welcome
+    // email.
+    app.background(func() {
+        err = app.mailer.Send(user.Email, "user_welcome.tmpl", user)
+        if err != nil {
+            app.logger.Error(err.Error())
+        }
+    })
+
+    err = app.writeJSON(w, http.StatusAccepted, envelope{"user": user}, nil)
+    if err != nil {
+        app.serverErrorResponse(w, r, err)
     }
 }
 ```
 
-And they have the answer right there. We’re explicitly telling the attacker that alice@example.com is already a user.
+## Graceful Shutdown of Background Tasks
+When we initiate a graceful shutdown of our application, it won’t wait for any background goroutines that we’ve launched to complete.
 
-So, what are the risks of leaking this information?
+It’s possible that a new client will be created on our system but they will never be sent their welcome email.
 
-The first, most obvious, risk relates to user privacy. For services that are sensitive or confidential you probably don’t want to make it obvious who has an account. The second risk is that it makes it easier for an attacker to compromise a user’s account. Once they know a user’s email address, they can potentially:
+### An introduction to sync.WaitGroup
+When you want to wait for a collection of goroutines to finish their work, the principal tool to help with this is the sync.WaitGroup type.
 
-- Target the user with social engineering or another type of tailored attack.
-- Search for the email address in leaked password tables, and try those same passwords on our service.
+The way that it works is conceptually a bit like a ‘counter’. Each time you launch a background goroutine you can increment the counter by 1, and when each goroutine finishes, you then decrement the counter by 1. You can then monitor the counter, and when it equals zero you know that all your background goroutines have finished.
+```go
+func main() {
+    // Declare a new WaitGroup.
+    var wg sync.WaitGroup
 
-Preventing enumeration attacks typically requires two things:
+    // Execute a loop 5 times.
+    for i := 1; i <= 5; i++ {
+        // Increment the WaitGroup counter by 1, BEFORE we launch the background routine.
+        wg.Add(1)
 
-- Making sure that the response sent to the client is always exactly the same, irrespective of whether a user exists or not. Generally, this means changing your response wording to be ambiguous, and notifying the user of any problems in a side-channel (such as sending them an email to inform them that they already have an account).
-- Making sure that the time taken to send the response is always the same, irrespective of whether a user exists or not. In Go, this generally means offloading work to a background goroutine.
+        // Launch the background goroutine.
+        go func() {
+            // Defer a call to wg.Done() to indicate that the background goroutine has 
+            // completed when this function returns. Behind the scenes this decrements 
+            // the WaitGroup counter by 1 and is the same as writing wg.Add(-1).
+            defer wg.Done()
 
-Unfortunately, these mitigations tend to increase the complexity of your application and add friction and obscurity to your workflows. For all your regular users who are not attackers, they’re a negative from a UX point of view.
+            fmt.Println("hello from a goroutine")
+        }()
+    }
 
-It’s worth noting that many big-name services, including Twitter, GitHub and Amazon, don’t prevent user enumeration (at least not on their registration pages).
+    // Wait() blocks until the WaitGroup counter is zero --- essentially blocking until all
+    // goroutines have completed.
+    wg.Wait()
+
+    fmt.Println("all goroutines finished")
+}
+```
+
+If you run the above code, you’ll see that the output looks like this:
+```shell
+hello from a goroutine
+hello from a goroutine
+hello from a goroutine
+hello from a goroutine
+hello from a goroutine
+all goroutines finished
+```
+
+### Fixing application
+Update our application to incorporate a sync.WaitGroup that coordinates our graceful shutdown and background goroutines.
+
+```go
+// Include a sync.WaitGroup in the application struct. The zero-value for a
+// sync.WaitGroup type is a valid, useable, sync.WaitGroup with a 'counter' value of 0,
+// so we don't need to do anything else to initialize it before we can use it.
+type application struct {
+    config config
+    logger *slog.Logger
+    models data.Models
+    mailer mailer.Mailer
+    wg     sync.WaitGroup
+}
+```
+
+File: cmd/api/helpers.go
+```go
+func (app *application) background(fn func()) {
+    // Increment the WaitGroup counter.
+    app.wg.Add(1)
+
+    // Launch the background goroutine.
+    go func() {
+        // Use defer to decrement the WaitGroup counter before the goroutine returns.
+        defer app.wg.Done()
+
+        defer func() {
+            if err := recover(); err != nil {
+                app.logger.Error(fmt.Sprintf("%v", err))
+            }
+        }()
+
+        fn()
+    }()
+}
+```
+
+File: cmd/api/server.go
+```go
+func (app *application) serve() error {
+    srv := &http.Server{
+        Addr:         fmt.Sprintf(":%d", app.config.port),
+        Handler:      app.routes(),
+        IdleTimeout:  time.Minute,
+        ReadTimeout:  5 * time.Second,
+        WriteTimeout: 10 * time.Second,
+        ErrorLog:     slog.NewLogLogger(app.logger.Handler(), slog.LevelError),
+    }
+
+    shutdownError := make(chan error)
+
+    go func() {
+        quit := make(chan os.Signal, 1)
+        signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+        s := <-quit
+
+        app.logger.Info("shutting down server", "signal", s.String())
+
+        ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+        defer cancel()
+
+        // Call Shutdown() on the server like before, but now we only send on the
+        // shutdownError channel if it returns an error.
+        err := srv.Shutdown(ctx)
+        if err != nil {
+            shutdownError <- err
+        }
+
+        // Log a message to say that we're waiting for any background goroutines to
+        // complete their tasks.
+        app.logger.Info("completing background tasks", "addr", srv.Addr)
+
+        // Call Wait() to block until our WaitGroup counter is zero --- essentially
+        // blocking until the background goroutines have finished. Then we return nil on
+        // the shutdownError channel, to indicate that the shutdown completed without
+        // any issues.
+        app.wg.Wait()
+        shutdownError <- nil
+    }()
+
+    app.logger.Info("starting server", "addr", srv.Addr, "env", app.config.env)
+
+    err := srv.ListenAndServe()
+    if !errors.Is(err, http.ErrServerClosed) {
+        return err
+    }
+
+    err = <-shutdownError
+    if err != nil {
+        return err
+    }
+
+    app.logger.Info("stopped server", "addr", srv.Addr)
+
+    return nil
+}
+```
+
+Send a request to the POST /v1/users endpoint immediately followed by a SIGTERM signal.
+```shell
+$ BODY='{"name": "Edith Smith", "email": "edith@example.com", "password": "pa55word"}'
+$ curl -d "$BODY" localhost:4000/v1/users & pkill -SIGTERM api &
+```
+
+When you do this, your server logs should look similar to the output below:
+```shell
+$ go run ./cmd/api
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="database connection pool established"
+time=2023-09-10T10:59:13.722+02:00 level=INFO msg="starting server" addr=:4000 env=development
+time=2023-09-10T10:59:14.722+02:00 level=INFO msg="shutting down server" signal=terminated
+time=2023-09-10T10:59:14.722+02:00 level=INFO msg="completing background tasks" addr=:4000
+time=2023-09-10T10:59:18.722+02:00 level=INFO msg="stopped server" addr=:4000
+```
+
+
