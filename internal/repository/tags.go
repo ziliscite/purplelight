@@ -4,35 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"github.com/jackc/pgx/v5"
 	"time"
 )
 
 func (a AnimeRepository) GetAllTags() ([]string, error) {
-	opts := pgx.TxOptions{
-		IsoLevel:   pgx.Serializable,
-		AccessMode: pgx.ReadOnly,
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	tx, err := a.db.BeginTx(ctx, opts)
-	if err != nil {
-		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
-	}
-
-	defer func() {
-		if err != nil {
-			// Rollback if an error occurs during the transaction
-			if rbErr := tx.Rollback(ctx); rbErr != nil {
-				a.logger.Error(ErrTransaction.Error(), "error", rbErr)
-			}
-		}
-	}()
-
-	rows, err := tx.Query(ctx, `SELECT tag.name FROM tag`)
+	rows, err := a.db.Query(ctx, `SELECT tag.name FROM tag`)
 	if err != nil {
 		return nil, err
 	}
@@ -45,10 +25,6 @@ func (a AnimeRepository) GetAllTags() ([]string, error) {
 			return nil, err
 		}
 		tags = append(tags, tag)
-	}
-
-	if err = tx.Commit(ctx); err != nil {
-		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
 	}
 
 	return tags, nil

@@ -23,6 +23,9 @@ func (app *application) routes() http.Handler {
 	router.HandlerFunc(http.MethodGet, "/v1/anime", app.listAnime)
 
 	router.HandlerFunc(http.MethodPost, "/v1/users", app.registerUser)
+	router.HandlerFunc(http.MethodPut, "/v1/users/activated", app.activateUser)
+	
+	router.HandlerFunc(http.MethodPost, "/v1/tokens/activation", app.createActivationToken)
 
 	// the middleware chain goes -> recoverPanic -> rateLimit -> logging
 	// So it works by first calling recoverPanic, then rateLimit, and finally logging
