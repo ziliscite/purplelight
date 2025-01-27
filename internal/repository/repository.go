@@ -10,6 +10,7 @@ import (
 type Repositories struct {
 	Anime AnimeRepository
 	User  UserRepository
+	Token TokenRepository
 }
 
 // NewRepositories For ease of use, we also add a New() method which returns a Models struct containing
@@ -19,5 +20,6 @@ func NewRepositories(db *pgxpool.Pool, logger *slog.Logger) Repositories {
 	return Repositories{
 		Anime: NewAnimeRepository(db, dblogger),
 		User:  NewUserRepository(db, dblogger),
+		Token: NewTokenRepository(db, dblogger),
 	}
 }

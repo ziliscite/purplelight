@@ -87,29 +87,10 @@ func (a AnimeRepository) InsertAnime(anime *data.Anime) error {
 
 // GetAnime Add a placeholder method for fetching a specific record from the movies table.
 func (a AnimeRepository) GetAnime(id int32) (*data.Anime, error) {
-	opts := pgx.TxOptions{
-		IsoLevel:   pgx.Serializable,
-		AccessMode: pgx.ReadOnly,
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	tx, err := a.db.BeginTx(ctx, opts)
-	if err != nil {
-		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
-	}
-
-	defer func() {
-		if err != nil {
-			// Rollback if an error occurs during the transaction
-			if rbErr := tx.Rollback(ctx); rbErr != nil {
-				a.logger.Error(ErrTransaction.Error(), "error", rbErr)
-			}
-		}
-	}()
-
-	animeStmt, err := tx.Prepare(ctx, "get anime", `		
+	query := `		
 		SELECT
 			a.id, a.title, a.type, a.episodes,
 			a.status, a.season, a.year, a.duration,
@@ -120,20 +101,13 @@ func (a AnimeRepository) GetAnime(id int32) (*data.Anime, error) {
 		JOIN tag t ON at.tag_id = t.id
 		WHERE a.id = $1
 		GROUP BY a.id, a.title, a.type, a.episodes, a.status, a.season, a.year, a.duration, a.created_at, a.version;
-	`)
-	if err != nil {
-		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrQueryPrepare, err.Error()))
-	}
+	`
 
 	var anime data.Anime
-	err = tx.QueryRow(ctx, animeStmt.SQL, id).
+	err := a.db.QueryRow(ctx, query, id).
 		Scan(&anime.ID, &anime.Title, &anime.Type, &anime.Episodes, &anime.Status, &anime.Season, &anime.Year, &anime.Duration, &anime.Tags, &anime.CreatedAt, &anime.Version)
 	if err != nil {
 		return nil, a.logger.handleError(err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, a.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
 	}
 
 	return &anime, nil
@@ -141,14 +115,14 @@ func (a AnimeRepository) GetAnime(id int32) (*data.Anime, error) {
 
 func (a AnimeRepository) GetAll(title string, status string, season string, animeType string, tags []string, filters data.Filters) ([]*data.Anime, data.Metadata, error) {
 	baseQuery := `
-	SELECT count(*) OVER(),
-		a.id, a.title, a.type, a.episodes,
-		a.status, a.season, a.year, a.duration,
-		ARRAY_AGG(t.name ORDER BY t.name) AS tags,
-		a.created_at, a.version
-	FROM anime a
-	JOIN anime_tags at ON a.id = at.anime_id
-	JOIN tag t ON at.tag_id = t.id
+		SELECT count(*) OVER(),
+			a.id, a.title, a.type, a.episodes,
+			a.status, a.season, a.year, a.duration,
+			ARRAY_AGG(t.name ORDER BY t.name) AS tags,
+			a.created_at, a.version
+		FROM anime a
+		JOIN anime_tags at ON a.id = at.anime_id
+		JOIN tag t ON at.tag_id = t.id
 	`
 
 	var args []interface{}

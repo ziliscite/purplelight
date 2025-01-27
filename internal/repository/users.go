@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -29,27 +30,8 @@ func NewUserRepository(db *pgxpool.Pool, logger *dbLogger) UserRepository {
 // RETURNING clause to read them into the User struct after the insert, in the same way
 // that we did when creating a movie.
 func (u UserRepository) Insert(user *data.User) error {
-	opts := pgx.TxOptions{
-		IsoLevel:   pgx.Serializable,
-		AccessMode: pgx.ReadWrite,
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-
-	tx, err := u.db.BeginTx(ctx, opts)
-	if err != nil {
-		return u.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
-	}
-
-	defer func() {
-		if err != nil {
-			// Rollback if an error occurs during the transaction
-			if rbErr := tx.Rollback(ctx); rbErr != nil {
-				u.logger.Error(ErrTransaction.Error(), "error", rbErr)
-			}
-		}
-	}()
 
 	query := `
         INSERT INTO users (name, email, password_hash, activated) 
@@ -63,7 +45,7 @@ func (u UserRepository) Insert(user *data.User) error {
 	// to perform the insert there will be a violation of the UNIQUE "users_email_key"
 	// constraint that we set up in the previous chapter. We check for this error
 	// specifically, and return custom ErrDuplicateEmail error instead.
-	err = tx.QueryRow(ctx, query, args...).Scan(&user.ID, &user.CreatedAt, &user.Version)
+	err := u.db.QueryRow(ctx, query, args...).Scan(&user.ID, &user.CreatedAt, &user.Version)
 	if err != nil {
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -73,11 +55,6 @@ func (u UserRepository) Insert(user *data.User) error {
 		}
 	}
 
-	// Commit transaction
-	if err = tx.Commit(ctx); err != nil {
-		return u.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
-	}
-
 	return nil
 }
 
@@ -85,27 +62,8 @@ func (u UserRepository) Insert(user *data.User) error {
 // Because we have a UNIQUE constraint on the email column, this SQL query will only
 // return one record (or none at all, in which case we return a ErrRecordNotFound error).
 func (u UserRepository) GetByEmail(email string) (*data.User, error) {
-	opts := pgx.TxOptions{
-		IsoLevel:   pgx.Serializable,
-		AccessMode: pgx.ReadOnly,
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-
-	tx, err := u.db.BeginTx(ctx, opts)
-	if err != nil {
-		return nil, u.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
-	}
-
-	defer func() {
-		if err != nil {
-			// Rollback if an error occurs during the transaction
-			if rbErr := tx.Rollback(ctx); rbErr != nil {
-				u.logger.Error(ErrTransaction.Error(), "error", rbErr)
-			}
-		}
-	}()
 
 	query := `
         SELECT id, created_at, name, email, password_hash, activated, version
@@ -116,13 +74,9 @@ func (u UserRepository) GetByEmail(email string) (*data.User, error) {
 	var user data.User
 
 	var hash []byte
-	err = tx.QueryRow(ctx, query, email).Scan(
-		&user.ID,
-		&user.CreatedAt,
-		&user.Name,
-		&user.Email,
-		&hash,
-		&user.Activated,
+	err := u.db.QueryRow(ctx, query, email).Scan(
+		&user.ID, &user.CreatedAt, &user.Name,
+		&user.Email, &hash, &user.Activated,
 		&user.Version,
 	)
 
@@ -135,11 +89,6 @@ func (u UserRepository) GetByEmail(email string) (*data.User, error) {
 		default:
 			return nil, u.logger.handleError(err)
 		}
-	}
-
-	// Commit transaction
-	if err = tx.Commit(ctx); err != nil {
-		return nil, u.logger.handleError(fmt.Errorf("%w: %s", ErrTransaction, err.Error()))
 	}
 
 	return &user, nil
@@ -205,4 +154,51 @@ func (u UserRepository) Update(user *data.User) error {
 	}
 
 	return nil
+}
+
+func (u UserRepository) GetForToken(tokenScope, tokenPlaintext string) (*data.User, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Calculate the SHA-256 hash of the plaintext token provided by the client.
+	// Remember that this returns a byte *array* with length 32, not a slice.
+	tokenHash := sha256.Sum256([]byte(tokenPlaintext))
+
+	// Set up the SQL query.
+	query := `
+        SELECT u.id, u.created_at, u.name, u.email, u.password_hash, u.activated, u.version
+        FROM users u
+        INNER JOIN tokens t
+        ON u.id = t.user_id
+        WHERE t.hash = $1 AND t.scope = $2 AND t.expiry > $3
+	`
+
+	// Create a slice containing the query arguments. Notice how we use the [:] operator
+	// to get a slice containing the token hash, rather than passing in the array (which
+	// is not supported by the pq driver), and that we pass the current time as the
+	// value to check against the token expiry.
+	args := []any{tokenHash[:], tokenScope, time.Now()}
+
+	var user data.User
+
+	var hash []byte
+	// Execute the query, scanning the return values into a User struct. If no matching
+	// record is found we return an ErrRecordNotFound error.
+	err := u.db.QueryRow(ctx, query, args...).Scan(
+		&user.ID,
+		&user.CreatedAt,
+		&user.Name,
+		&user.Email,
+		&hash,
+		&user.Activated,
+		&user.Version,
+	)
+	if err != nil {
+		return nil, u.logger.handleError(err)
+	}
+
+	user.Password.InsertHash(hash)
+
+	// Return the matching user.
+	return &user, nil
 }

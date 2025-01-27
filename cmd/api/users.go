@@ -6,6 +6,7 @@ import (
 	"github.com/ziliscite/purplelight/internal/repository"
 	"github.com/ziliscite/purplelight/internal/validator"
 	"net/http"
+	"time"
 )
 
 func (app *application) registerUser(w http.ResponseWriter, r *http.Request) {
@@ -61,11 +62,28 @@ func (app *application) registerUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// After the user record has been created in the database, generate a new activation
+	// token for the user.
+	token, err := app.repos.Token.New(user.ID, 3*24*time.Hour, data.ScopeActivation)
+	if err != nil {
+		app.dbWriteError(w, r, err)
+		return
+	}
+
 	// Launch a goroutine which runs an anonymous function that sends the welcome email.
 	app.background(func() {
+		// As there are now multiple pieces of data that we want to pass to our email
+		// templates, we create a map to act as a 'holding structure' for the data. This
+		// contains the plaintext version of the activation token for the user, along
+		// with their ID.
+		userData := map[string]any{
+			"activationToken": token.Plaintext,
+			"userID":          user.ID,
+		}
+
 		// Call the Send() method on our Mailer, passing in the user's email address,
 		// name of the template file, and the User struct containing the new user's data.
-		err = app.mailer.Send(user.Email, "user_welcome.tmpl", user)
+		err = app.mailer.Send(user.Email, "user_welcome.tmpl", userData)
 		if err != nil {
 			// Importantly, if there is an error sending the email then we use the
 			// app.logger.Error() helper to manage it, instead of the
