@@ -32,6 +32,14 @@ type Config struct {
 		burst   int
 		enabled bool
 	}
+	// Add a new smtp struct containing fields for the SMTP server settings.
+	smtp struct {
+		host     string
+		port     int
+		username string
+		password string
+		sender   string
+	}
 }
 
 var (
@@ -69,6 +77,16 @@ func GetConfig() Config {
 		flag.Float64Var(&instance.limiter.rps, "limiter-rps", 5, "Rate limiter maximum requests per second")
 		flag.IntVar(&instance.limiter.burst, "limiter-burst", 10, "Rate limiter maximum burst")
 		flag.BoolVar(&instance.limiter.enabled, "limiter-enabled", true, "Enable rate limiter")
+
+		// Read the SMTP server configuration settings into the config struct, using the
+		// Mailtrap settings as the default values. IMPORTANT: If you're following along,
+		// make sure to replace the default values for smtp-username and smtp-password
+		// with your own Mailtrap credentials.
+		flag.StringVar(&instance.smtp.host, "smtp-host", "sandbox.smtp.mailtrap.io", "SMTP host")
+		flag.IntVar(&instance.smtp.port, "smtp-port", 25, "SMTP port")
+		flag.StringVar(&instance.smtp.username, "smtp-username", os.Getenv("SMTP_USERNAME"), "SMTP username")
+		flag.StringVar(&instance.smtp.password, "smtp-password", os.Getenv("SMTP_PASSWORD"), "SMTP password")
+		flag.StringVar(&instance.smtp.sender, "smtp-sender", "Purplelight <no-reply@purplelight.ziliscite.id>", "SMTP sender")
 
 		flag.Parse()
 	})
