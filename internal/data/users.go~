@@ -7,9 +7,6 @@ import (
 	"time"
 )
 
-// AnonymousUser is the default user when no token is provided.
-var AnonymousUser = &User{}
-
 // User represents an individual user. Importantly, notice how we are
 // using the json:"-" struct tag to prevent the Password and Version fields appearing in
 // any output when we encode it to JSON. Also notice that the Password field uses the
@@ -22,11 +19,6 @@ type User struct {
 	Password  password  `json:"-"`
 	Activated bool      `json:"activated"`
 	Version   int       `json:"-"`
-}
-
-// IsAnonymous Check if a User instance is the AnonymousUser.
-func (u *User) IsAnonymous() bool {
-	return u == AnonymousUser
 }
 
 // Hash method returns the bcrypt hash of the user's plaintext password.

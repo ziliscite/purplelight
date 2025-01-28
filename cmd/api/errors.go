@@ -75,6 +75,19 @@ func (app *application) rateLimitExceeded(w http.ResponseWriter, r *http.Request
 	app.error(w, r, http.StatusTooManyRequests, message)
 }
 
+func (app *application) invalidCredentials(w http.ResponseWriter, r *http.Request) {
+	message := "invalid authentication credentials"
+	app.error(w, r, http.StatusUnauthorized, message)
+}
+
+func (app *application) invalidAuthenticationToken(w http.ResponseWriter, r *http.Request) {
+	// Indicating that a Bearer token is expected in the Authorization header.
+	w.Header().Set("WWW-Authenticate", "Bearer")
+
+	message := "invalid or missing authentication token"
+	app.error(w, r, http.StatusUnauthorized, message)
+}
+
 func (app *application) dbWriteError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, repository.ErrDuplicateEntry):

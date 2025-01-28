@@ -97,3 +97,71 @@ func (app *application) registerUser(w http.ResponseWriter, r *http.Request) {
 		app.serverError(w, r, err)
 	}
 }
+
+func (app *application) activateUser(w http.ResponseWriter, r *http.Request) {
+	// Parse the plaintext activation token from the request body.
+	var input struct {
+		TokenPlaintext string `json:"token"`
+	}
+
+	err := app.readBody(w, r, &input)
+	if err != nil {
+		app.badRequest(w, r, err)
+		return
+	}
+
+	// Validate the plaintext token provided by the client.
+	v := validator.New()
+
+	if data.ValidateTokenPlaintext(v, input.TokenPlaintext); !v.Valid() {
+		app.failedValidation(w, r, v.Errors)
+		return
+	}
+
+	// Retrieve the details of the user associated with the token using the
+	// GetForToken() method. If no matching record
+	// is found, then we let the client know that the token they provided is not valid.
+	user, err := app.repos.User.GetForToken(data.ScopeActivation, input.TokenPlaintext)
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrRecordNotFound):
+			v.AddError("token", "invalid or expired activation token")
+			app.failedValidation(w, r, v.Errors)
+		default:
+			app.dbReadError(w, r, err)
+		}
+		return
+	}
+
+	// Update the user's activation status.
+	user.Activated = true
+
+	// Save the updated user record in our database, checking for any edit conflicts in
+	// the same way that we did for our movie records.
+	err = app.repos.User.Update(user)
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrEditConflict):
+			app.editConflict(w, r)
+		default:
+			app.dbWriteError(w, r, err)
+		}
+		return
+	}
+
+	// don't we usually want to use a transaction for this?
+
+	// If everything went successfully, then we delete all activation tokens for the
+	// user.
+	err = app.repos.Token.DeleteAllForUser(data.ScopeActivation, user.ID) // what if this fails?
+	if err != nil {
+		app.serverError(w, r, err)
+		return
+	}
+
+	// Send the updated user details to the client in a JSON response.
+	err = app.write(w, http.StatusOK, envelope{"user": user}, nil)
+	if err != nil {
+		app.serverError(w, r, err)
+	}
+}
