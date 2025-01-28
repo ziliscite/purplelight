@@ -40,3 +40,5 @@ func (app *application) routes() http.Handler {
 	// and if rate limit returns 429, then logging will also be called
 	return app.logging(app.recoverPanic(app.rateLimit(app.authenticate(router))))
 }
+
+

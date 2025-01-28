@@ -145,3 +145,4 @@ func (app *application) createAuthenticationToken(w http.ResponseWriter, r *http
 		app.serverError(w, r, err)
 	}
 }
+
