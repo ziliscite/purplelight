@@ -88,8 +88,7 @@ func (app *application) readBody(w http.ResponseWriter, r *http.Request, dst any
 	// struct as the target decode destination. If there was an error during decoding,
 	// we also use our generic errorResponse() helper to send the client a 400 Bad
 	// Request response containing the error message.
-	err := dec.Decode(dst)
-	if err != nil {
+	if err := dec.Decode(dst); err != nil {
 		var syntaxError *json.SyntaxError
 		var unmarshalTypeError *json.UnmarshalTypeError
 		var invalidUnmarshalError *json.InvalidUnmarshalError
@@ -161,8 +160,7 @@ func (app *application) readBody(w http.ResponseWriter, r *http.Request, dst any
 	// destination. If the request body only contained a single JSON value this will
 	// return an io.EOF error. So if we get anything else, we know that there is
 	// additional data in the request body and we return our own custom error message.
-	err = dec.Decode(&struct{}{})
-	if !errors.Is(err, io.EOF) {
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return errors.New("body must only contain a single JSON value")
 	}
 

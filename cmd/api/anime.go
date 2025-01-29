@@ -38,10 +38,9 @@ func (app *application) createAnime(w http.ResponseWriter, r *http.Request) {
 		switch {
 		// If we get an ErrDuplicateEmail error, use the v.AddError() method to manually
 		// add a message to the validator instance, and then call our
-		// failedValidationResponse() helper.
 		case errors.Is(err, repository.ErrDuplicateEntry):
 			v.AddError("title", "an anime with this title already exists")
-			app.failedValidation(w, r, v.Errors)
+			app.insertConflict(w, r, v.Errors)
 		default:
 			app.dbWriteError(w, r, err)
 		}

@@ -47,18 +47,31 @@ func (app *application) registerUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Yo chat, I might need to use transactions among these 3 operations
+	// It'll be real disaster if user is inserted, but then it fails midway
+	// token will not be sent, and the necessary permissions will not be granted...
+
+	// TODO: Refactor the codebase to use a service layer so we can manage transactions between these 3 repositories
+	// For other handlers as well
+
 	err = app.repos.User.Insert(user)
 	if err != nil {
 		switch {
 		// If we get an ErrDuplicateEmail error, use the v.AddError() method to manually
-		// add a message to the validator instance, and then call our
-		// failedValidationResponse() helper.
+		// add a message to the validator instance
 		case errors.Is(err, repository.ErrDuplicateEntry):
 			v.AddError("email", "a user with this email address already exists")
 			app.failedValidation(w, r, v.Errors)
 		default:
 			app.dbWriteError(w, r, err)
 		}
+		return
+	}
+
+	// Add the "movies:read" permission for the new user.
+	err = app.repos.Permission.AddForUser(user.ID, "anime:read")
+	if err != nil {
+		app.dbWriteError(w, r, err)
 		return
 	}
 
