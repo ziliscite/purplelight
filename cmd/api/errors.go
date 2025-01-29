@@ -25,7 +25,7 @@ func (app *application) error(w http.ResponseWriter, r *http.Request, status int
 	err := app.write(w, status, envelope{"error": message}, nil)
 	if err != nil {
 		app.logError(r, err)
-		w.WriteHeader(500)
+		w.WriteHeader(http.StatusInternalServerError)
 	}
 }
 
@@ -65,6 +65,10 @@ func (app *application) failedValidation(w http.ResponseWriter, r *http.Request,
 	app.error(w, r, http.StatusUnprocessableEntity, errors)
 }
 
+func (app *application) insertConflict(w http.ResponseWriter, r *http.Request, errors map[string]string) {
+	app.error(w, r, http.StatusConflict, errors)
+}
+
 func (app *application) editConflict(w http.ResponseWriter, r *http.Request) {
 	message := "unable to proceed due to a edit conflict, please try again"
 	app.error(w, r, http.StatusConflict, message)
@@ -86,6 +90,21 @@ func (app *application) invalidAuthenticationToken(w http.ResponseWriter, r *htt
 
 	message := "invalid or missing authentication token"
 	app.error(w, r, http.StatusUnauthorized, message)
+}
+
+func (app *application) authenticationRequired(w http.ResponseWriter, r *http.Request) {
+	message := "you must be authenticated to access this resource"
+	app.error(w, r, http.StatusUnauthorized, message)
+}
+
+func (app *application) inactiveAccount(w http.ResponseWriter, r *http.Request) {
+	message := "your user account must be activated to access this resource"
+	app.error(w, r, http.StatusForbidden, message)
+}
+
+func (app *application) notPermitted(w http.ResponseWriter, r *http.Request) {
+	message := "your user account doesn't have the necessary permissions to access this resource"
+	app.error(w, r, http.StatusForbidden, message)
 }
 
 func (app *application) dbWriteError(w http.ResponseWriter, r *http.Request, err error) {
