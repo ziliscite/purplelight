@@ -38,5 +38,5 @@ func (app *application) routes() http.Handler {
 	// logging -> recoverPanic -> rateLimit
 	// so that if recoverPanic panics, then logging will be called
 	// and if rate limit returns 429, then logging will also be called
-	return app.logging(app.recoverPanic(app.rateLimit(app.authenticate(router))))
+	return app.logging(app.recoverPanic(app.enableCORS(app.rateLimit(app.authenticate(router)))))
 }
