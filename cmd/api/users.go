@@ -61,7 +61,7 @@ func (app *application) registerUser(w http.ResponseWriter, r *http.Request) {
 		// add a message to the validator instance
 		case errors.Is(err, repository.ErrDuplicateEntry):
 			v.AddError("email", "a user with this email address already exists")
-			app.failedValidation(w, r, v.Errors)
+			app.insertConflict(w, r, v.Errors)
 		default:
 			app.dbWriteError(w, r, err)
 		}

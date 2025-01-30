@@ -1,6 +1,7 @@
 package main
 
 import (
+	"expvar"
 	"github.com/julienschmidt/httprouter"
 	"net/http"
 )
@@ -29,6 +30,9 @@ func (app *application) routes() http.Handler {
 	router.HandlerFunc(http.MethodPost, "/v1/tokens/authentication", app.createAuthenticationToken)
 	router.HandlerFunc(http.MethodPost, "/v1/tokens/activation", app.createActivationToken)
 
+	// Register a new GET /v1/metrics endpoint pointing to the expvar handler.
+	router.Handler(http.MethodGet, "/v1/metrics", expvar.Handler())
+
 	// the middleware chain goes -> recoverPanic -> rateLimit -> logging
 	// So it works by first calling recoverPanic, then rateLimit, and finally logging
 	// which means, if recoverPanic panics, then rateLimit will not be called
@@ -38,5 +42,5 @@ func (app *application) routes() http.Handler {
 	// logging -> recoverPanic -> rateLimit
 	// so that if recoverPanic panics, then logging will be called
 	// and if rate limit returns 429, then logging will also be called
-	return app.logging(app.recoverPanic(app.enableCORS(app.rateLimit(app.authenticate(router)))))
+	return app.metrics(app.logging(app.recoverPanic(app.enableCORS(app.rateLimit(app.authenticate(router))))))
 }
