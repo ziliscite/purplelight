@@ -6,6 +6,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ziliscite/purplelight/internal/mailer"
 	"github.com/ziliscite/purplelight/internal/repository"
+	"github.com/ziliscite/purplelight/internal/vcs"
 	"log/slog"
 	"os"
 	"runtime"
@@ -14,7 +15,9 @@ import (
 )
 
 // Remember, our version number is just a constant string (for now).
-const version = "1.0.0"
+var (
+	version = vcs.Version()
+)
 
 // Add a models field to hold our new Models struct.
 // Include a sync.WaitGroup in the application struct. The zero-value for a

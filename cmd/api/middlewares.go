@@ -4,11 +4,11 @@ import (
 	"errors"
 	"expvar"
 	"fmt"
+	"github.com/tomasen/realip"
 	"github.com/ziliscite/purplelight/internal/data"
 	"github.com/ziliscite/purplelight/internal/repository"
 	"github.com/ziliscite/purplelight/internal/validator"
 	"golang.org/x/time/rate"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -88,11 +88,9 @@ func (app *application) rateLimit(next http.Handler) http.Handler {
 		if app.config.limiter.enabled {
 			// Get the IP address of the current request.
 			// If it's not in the map, then we know that it's a new client.
-			ip, _, err := net.SplitHostPort(r.RemoteAddr)
-			if err != nil {
-				app.serverError(w, r, err)
-				return
-			}
+			//
+			// Use the realip.FromRequest() function to get the client's real IP address.
+			ip := realip.FromRequest(r)
 
 			// Lock the mutex to prevent this code from being executed concurrently.
 			mu.Lock()
